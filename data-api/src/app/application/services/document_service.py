@@ -1,0 +1,420 @@
+"""Service for document management operations."""
+
+import hashlib
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
+
+from fastapi import UploadFile
+from app.exceptions import ConflictError, ResourceNotFoundError, ExternalServiceError
+from app.infrastructure.connectors.postgres.repositories.knowledge_base_repository import KnowledgeBaseRepository
+from app.infrastructure.connectors.postgres.repositories.document_repository import DocumentRepository
+from app.infrastructure.connectors.postgres.repositories.chunk_repository import ChunkRepository
+from app.infrastructure.connectors.postgres.schema import Document
+from app.infrastructure.clients.s3_client_service import S3ClientService
+from app.celery_client import send_preprocess_task, send_graph_preprocess_task
+from app.configurations.configurations import settings
+
+import asyncio
+
+logger = logging.getLogger(__name__)
+
+
+async def _graphrag_delete_document_graph(
+    kb_id: str, document_id: str, chunk_ids: list[str]
+) -> None:
+    """
+    Delete or trim GraphRAG graph data when a document is removed.
+
+    LightRAG-inspired algorithm:
+    - Entities/relations whose chunk_ids become empty after removing this
+      document's chunks are fully deleted from GRAPHRAG_VDB_ENTITY/RELATION
+      and Neo4j (DETACH DELETE removes incident edges automatically).
+    - Entities/relations that still reference other documents' chunks have
+      their chunk_ids trimmed in PGVector (description kept; no LLM rebuild).
+    - Any GRAPHRAG_VDB_RELATION rows pointing to a deleted entity are also
+      removed (orphan cleanup).
+    """
+    if not chunk_ids:
+        return
+
+    from app.infrastructure.graph.neo4j_store import Neo4jStore
+    from app.infrastructure.connectors.postgres.database import db_session
+    from sqlalchemy import text as sql_text
+
+    chunk_ids_set = set(chunk_ids)
+    session_factory = db_session.get_session()
+    neo4j = Neo4jStore(
+        uri=settings.NEO4J_URI,
+        username=settings.NEO4J_USERNAME,
+        password=settings.NEO4J_PASSWORD,
+        database=settings.NEO4J_DATABASE,
+    )
+
+    try:
+        async with session_factory() as pg:
+            # --- Classify affected entities ---
+            entity_rows = (
+                await pg.execute(
+                    sql_text("""
+                        SELECT id, entity_name, chunk_ids
+                        FROM "GRAPHRAG_VDB_ENTITY"
+                        WHERE workspace = :kb_id
+                          AND chunk_ids && CAST(:chunk_ids AS varchar[])
+                    """),
+                    {"kb_id": kb_id, "chunk_ids": list(chunk_ids_set)},
+                )
+            ).fetchall()
+
+            entities_to_delete_ids: list[str] = []
+            entities_to_delete_names: list[str] = []
+            entities_to_update: list[tuple[str, list[str]]] = []
+
+            for row in entity_rows:
+                remaining = [c for c in (row.chunk_ids or []) if c not in chunk_ids_set]
+                if not remaining:
+                    entities_to_delete_ids.append(row.id)
+                    entities_to_delete_names.append(row.entity_name)
+                else:
+                    entities_to_update.append((row.id, remaining))
+
+            # --- Classify affected relations ---
+            rel_rows = (
+                await pg.execute(
+                    sql_text("""
+                        SELECT id, source_id, target_id, chunk_ids
+                        FROM "GRAPHRAG_VDB_RELATION"
+                        WHERE workspace = :kb_id
+                          AND chunk_ids && CAST(:chunk_ids AS varchar[])
+                    """),
+                    {"kb_id": kb_id, "chunk_ids": list(chunk_ids_set)},
+                )
+            ).fetchall()
+
+            relations_to_delete_ids: list[str] = []
+            relations_to_delete_pairs: list[tuple[str, str]] = []
+            relations_to_update: list[tuple[str, list[str]]] = []
+
+            for row in rel_rows:
+                remaining = [c for c in (row.chunk_ids or []) if c not in chunk_ids_set]
+                if not remaining:
+                    relations_to_delete_ids.append(row.id)
+                    relations_to_delete_pairs.append((row.source_id, row.target_id))
+                else:
+                    relations_to_update.append((row.id, remaining))
+
+            # --- Apply PGVector changes ---
+            if entities_to_delete_ids:
+                await pg.execute(
+                    sql_text("""
+                        DELETE FROM "GRAPHRAG_VDB_ENTITY"
+                        WHERE workspace = :kb_id AND id = ANY(:ids)
+                    """),
+                    {"kb_id": kb_id, "ids": entities_to_delete_ids},
+                )
+
+            for vdb_id, remaining in entities_to_update:
+                await pg.execute(
+                    sql_text("""
+                        UPDATE "GRAPHRAG_VDB_ENTITY"
+                        SET chunk_ids = :chunk_ids
+                        WHERE workspace = :kb_id AND id = :id
+                    """),
+                    {"kb_id": kb_id, "id": vdb_id, "chunk_ids": remaining},
+                )
+
+            if relations_to_delete_ids:
+                await pg.execute(
+                    sql_text("""
+                        DELETE FROM "GRAPHRAG_VDB_RELATION"
+                        WHERE workspace = :kb_id AND id = ANY(:ids)
+                    """),
+                    {"kb_id": kb_id, "ids": relations_to_delete_ids},
+                )
+
+            for vdb_id, remaining in relations_to_update:
+                await pg.execute(
+                    sql_text("""
+                        UPDATE "GRAPHRAG_VDB_RELATION"
+                        SET chunk_ids = :chunk_ids
+                        WHERE workspace = :kb_id AND id = :id
+                    """),
+                    {"kb_id": kb_id, "id": vdb_id, "chunk_ids": remaining},
+                )
+
+            # --- Orphan cleanup: relations pointing to deleted entities ---
+            if entities_to_delete_names:
+                await pg.execute(
+                    sql_text("""
+                        DELETE FROM "GRAPHRAG_VDB_RELATION"
+                        WHERE workspace = :kb_id
+                          AND (source_id = ANY(:names) OR target_id = ANY(:names))
+                    """),
+                    {"kb_id": kb_id, "names": entities_to_delete_names},
+                )
+
+            await pg.commit()
+
+        # --- Apply Neo4j changes ---
+        # DETACH DELETE removes the node and all its incident edges.
+        if entities_to_delete_names:
+            await neo4j.delete_nodes_batch(kb_id, entities_to_delete_names)
+
+        # Delete relation edges where both endpoints are kept but chunk_ids emptied.
+        if relations_to_delete_pairs:
+            await neo4j.delete_edges_batch(kb_id, relations_to_delete_pairs)
+
+        logger.info(
+            "GraphRAG delete: doc=%s kb=%s | "
+            "entities deleted=%d updated=%d | relations deleted=%d updated=%d",
+            document_id, kb_id,
+            len(entities_to_delete_ids), len(entities_to_update),
+            len(relations_to_delete_ids), len(relations_to_update),
+        )
+
+    except Exception as exc:
+        logger.error(
+            "GraphRAG graph delete failed for doc=%s kb=%s: %s",
+            document_id, kb_id, exc, exc_info=True,
+        )
+    finally:
+        await neo4j.close()
+
+
+def _parse_s3_url(url: str) -> Tuple[str, str]:
+    """Parse 's3://bucket/key' into (bucket, key)."""
+    without_scheme = url[5:]  # strip "s3://"
+    bucket, key = without_scheme.split("/", 1)
+    return bucket, key
+
+
+class DocumentsService:
+    def __init__(
+        self,
+        knowledge_base_repository: KnowledgeBaseRepository,
+        document_repository: DocumentRepository,
+        s3_client_service: S3ClientService,
+        chunk_repository: ChunkRepository,
+    ):
+        self.knowledge_base_repository = knowledge_base_repository
+        self.document_repository = document_repository
+        self.s3_client_service = s3_client_service
+        self.chunk_repository = chunk_repository
+
+    async def add_documents(
+        self,
+        kb_id: str,
+        files: List[UploadFile],
+        cmetadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """
+        Upload documents to S3 and enqueue them for processing.
+
+        Args:
+            kb_id: Knowledge base ID
+            files: Files to upload
+            cmetadata: Optional custom metadata
+
+        Raises:
+            ResourceNotFoundError: If knowledge base does not exist
+            ConflictError: If any filename already exists in this knowledge base
+            ExternalServiceError: If S3 upload fails
+        """
+        # 1. Verify knowledge base exists (raises ResourceNotFoundError if not)
+        knowledge_base = await self.knowledge_base_repository.get(id=kb_id)
+
+        # 2. Read file bytes early so we can compute etags for duplicate detection
+        file_datas = await asyncio.gather(*[f.read() for f in files])
+
+        # 3. Compute MD5 etag for each file (matches S3 ETag for single-part uploads)
+        file_etags = [hashlib.md5(data).hexdigest() for data in file_datas]
+
+        # 4. Check for duplicate filenames and duplicate content (etag) in parallel
+        conflict_names, conflict_etags = await asyncio.gather(
+            self.document_repository.find_conflicts(kb_id, [f.filename for f in files]),
+            self.document_repository.find_etag_conflicts(kb_id, file_etags),
+        )
+
+        if conflict_names or conflict_etags:
+            details = {}
+            if conflict_names:
+                details["conflicting_filenames"] = list(conflict_names)
+            if conflict_etags:
+                details["conflicting_etags"] = list(conflict_etags)
+            logger.warning(f"Duplicate documents detected in kb {kb_id}: {details}")
+            raise ConflictError(
+                message="One or more documents already exist in this knowledge base",
+                details=details,
+            )
+
+        # 5. Upload to S3
+        try:
+            await asyncio.gather(*[
+                self.s3_client_service.upload_file(
+                    data_buffer=file_data,
+                    bucket=settings.BUCKET_NAME,
+                    kb_id=kb_id,
+                    file_name=file.filename,
+                )
+                for file_data, file in zip(file_datas, files)
+            ])
+        except Exception as exc:
+            raise ExternalServiceError("S3", f"Failed to upload files: {exc}") from exc
+
+        # 6. Create document records with s3_url and etag
+        documents = [
+            Document(
+                id=str(uuid4()),
+                kb_id=kb_id,
+                name=file.filename,
+                cmetadata=cmetadata,
+                status="Created",
+                s3_url=f"s3://{settings.BUCKET_NAME}/{kb_id}/{file.filename}",
+                etag=etag,
+            )
+            for file, etag in zip(files, file_etags)
+        ]
+        await self.document_repository.bulk_create(documents)
+
+        # 6. Enqueue preprocessing tasks (classic RAG or GraphRAG depending on KB config)
+        rag_mode = (knowledge_base.parser_config or {}).get("rag_mode", "classic")
+
+        for doc in documents:
+            correlation_id = str(uuid4())
+
+            if rag_mode == "graphrag":
+                logger.info(
+                    f"Enqueueing graph_ingest task for document {doc.id} "
+                    f"[rag_mode=graphrag correlation_id={correlation_id}]"
+                )
+                send_graph_preprocess_task(
+                    document_id=doc.id,
+                    knowledge_base_id=kb_id,
+                    name=doc.name,
+                    bucket=settings.BUCKET_NAME,
+                    correlation_id=correlation_id,
+                )
+            else:
+                logger.info(
+                    f"Enqueueing preprocess task for document {doc.id} "
+                    f"[rag_mode=classic correlation_id={correlation_id}]"
+                )
+                send_preprocess_task(
+                    document_id=doc.id,
+                    knowledge_base_id=kb_id,
+                    name=doc.name,
+                    embedding_model_id=knowledge_base.embed_id,
+                    bucket=settings.BUCKET_NAME,
+                    correlation_id=correlation_id,
+                )
+
+    async def list_documents(self, kb_id: str) -> List[Dict[str, Any]]:
+        """
+        List all documents in a knowledge base.
+
+        Raises:
+            ResourceNotFoundError: If the knowledge base does not exist
+        """
+        await self.knowledge_base_repository.get(id=kb_id)
+
+        documents = await self.document_repository.get(kb_id=kb_id)
+        return [
+            {
+                "id": doc.id,
+                "name": doc.name,
+                "kb_id": doc.kb_id,
+                "status": doc.status if isinstance(doc.status, str) else doc.status.value,
+                "etag": doc.etag,
+                "cmetadata": doc.cmetadata,
+                "create_time": doc.create_time.isoformat() if doc.create_time else None,
+                "update_time": doc.update_time.isoformat() if doc.update_time else None,
+            }
+            for doc in documents
+        ]
+
+    async def delete_documents(self, document_ids: List[str]) -> None:
+        """
+        Delete documents and their associated S3 files.
+
+        Args:
+            document_ids: List of document IDs to delete
+
+        Raises:
+            ResourceNotFoundError: If no documents found for the given IDs
+            ExternalServiceError: If S3 deletion fails
+        """
+        documents = await self.document_repository.get_by_ids(document_ids)
+        if not documents:
+            raise ResourceNotFoundError("Document", str(document_ids))
+
+        # Delete files from S3
+        try:
+            await asyncio.gather(*[
+                self.s3_client_service.delete_file(
+                    settings.BUCKET_NAME,
+                    doc.kb_id,
+                    doc.name,
+                )
+                for doc in documents
+            ])
+        except Exception as exc:
+            raise ExternalServiceError("S3", f"Failed to delete files: {exc}") from exc
+
+        await self.document_repository.bulk_delete(document_ids)
+
+    async def delete_document(self, kb_id: str, doc_id: str) -> None:
+        """
+        Delete a single document: removes the original S3 file, all chunk S3 files,
+        and the document record (chunks cascade automatically).
+
+        For GraphRAG knowledge bases, also deletes from the Neo4j graph and
+        GraphRAG vector/KV stores directly (synchronously).
+
+        Args:
+            kb_id: Knowledge base ID the document belongs to
+            doc_id: Document ID to delete
+
+        Raises:
+            ResourceNotFoundError: If the document does not exist or does not belong to the KB
+            ExternalServiceError: If any S3 deletion fails
+        """
+        documents = await self.document_repository.get(id=doc_id, kb_id=kb_id)
+        if not documents:
+            raise ResourceNotFoundError("Document", doc_id)
+
+        doc = documents[0]
+
+        # For GraphRAG KBs: delete from graph/vector/KV stores before removing from DB
+        knowledge_base = await self.knowledge_base_repository.get(id=kb_id)
+        rag_mode = (knowledge_base.parser_config or {}).get("rag_mode", "classic")
+
+        if rag_mode == "graphrag":
+            chunk_ids = await self.chunk_repository.get_ids_by_document_id(doc_id)
+            if chunk_ids:
+                await _graphrag_delete_document_graph(
+                    kb_id=kb_id,
+                    document_id=doc_id,
+                    chunk_ids=chunk_ids,
+                )
+
+        # Fetch S3 URLs for all chunks of this document
+        chunk_s3_urls = await self.chunk_repository.get_s3_urls_by_document_id(doc_id)
+
+        # Delete chunk files from S3
+        if chunk_s3_urls:
+            try:
+                await asyncio.gather(*[
+                    self.s3_client_service.delete_file_by_key(*_parse_s3_url(url))
+                    for url in chunk_s3_urls
+                ])
+            except Exception as exc:
+                raise ExternalServiceError("S3", f"Failed to delete chunk files: {exc}") from exc
+
+        # Delete the original document file from S3
+        try:
+            await self.s3_client_service.delete_file(settings.BUCKET_NAME, doc.kb_id, doc.name)
+        except Exception as exc:
+            raise ExternalServiceError("S3", f"Failed to delete document file: {exc}") from exc
+
+        # Delete document from DB (chunks cascade)
+        await self.document_repository.bulk_delete([doc_id])
