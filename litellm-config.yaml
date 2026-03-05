@@ -1,0 +1,16 @@
+model_list:
+  # Embedding model using Google Gemini
+  - model_name: rag-embedding-model
+    litellm_params:
+      model: gemini/gemini-embedding-001
+      api_key: your-gemini-api-key-here
+
+  # Chat model for LightRAG entity extraction
+  - model_name: graphrag-llm
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      api_key: your-gemini-api-key-here
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
