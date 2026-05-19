@@ -14,6 +14,7 @@ from app.celery_app.config import celery_app
 from app.configurations.configurations import settings
 from app.container import container
 from app.infrastructure.repositories.chunk_repository import ChunkRepository
+from app.infrastructure.repositories.document_repository import DocumentRepository
 from app.infrastructure.repositories.embedding_writer_repository import EmbeddingWriterRepository
 
 logger = logging.getLogger(__name__)
@@ -99,9 +100,20 @@ def upsert_chunk(
                 )
 
             # ------------------------------------------------------------------
-            # Mark chunk succeeded
+            # Mark chunk succeeded and refresh the document's progress %.
+            # The recompute is one atomic SQL — concurrent upsert_chunk tasks
+            # for the same document can't desync the counter.
             # ------------------------------------------------------------------
             await chunk_repo.set_status(chunk_id, "Succeed")
+            try:
+                doc_repo = DocumentRepository(container.session_factory)
+                await doc_repo.recompute_ingesting_progress(document_id)
+            except Exception as prog_err:
+                # Progress is cosmetic — never let it sink the upsert.
+                logger.warning(
+                    "%s chunk=%s progress refresh failed: %s",
+                    log_prefix, chunk_id, prog_err,
+                )
             logger.info("%s chunk=%s done", log_prefix, chunk_id)
             return {"chunk_id": chunk_id, "status": "success"}
 

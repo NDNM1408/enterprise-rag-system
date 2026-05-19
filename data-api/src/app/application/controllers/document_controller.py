@@ -2,9 +2,9 @@
 
 import json
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, Path, Request
+from fastapi import APIRouter, UploadFile, File, Form, Depends, Path, Request, Body
 
 from app.configurations.dependencies import get_document_service
 from app.application.services.document_service import DocumentsService
@@ -104,6 +104,27 @@ async def create_documents(
             "status": "processing"
         },
         request_id=request_id
+    )
+
+
+@router.post(
+    "/internal/parse-callback",
+    summary="Document-parsing service callback",
+    description=(
+        "Internal webhook the document-parsing worker calls to report progress, "
+        "completion, or failure of a parse job. Trusted on internal network only."
+    ),
+)
+async def parse_callback(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    document_service: DocumentsService = Depends(get_document_service),
+):
+    await document_service.handle_parse_callback(payload)
+    request_id = getattr(request.state, "request_id", "unknown")
+    return create_success_response(
+        data={"ack": True, "job_id": payload.get("job_id") or payload.get("id")},
+        request_id=request_id,
     )
 
 

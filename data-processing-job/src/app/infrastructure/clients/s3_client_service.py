@@ -62,3 +62,25 @@ class S3ClientService:
         except (BotoCoreError, ClientError) as e:
             self.logger.error(f"Failed to get file content from S3: {e}")
             raise RuntimeError(f"S3 file retrieval failed: {e}") from e
+
+    @staticmethod
+    def parse_s3_url(url: str) -> tuple[str, str]:
+        """Parse 's3://bucket/key/...' into (bucket, key). Raises ValueError on bad form."""
+        if not url or not url.startswith("s3://"):
+            raise ValueError(f"not an s3:// URL: {url!r}")
+        rest = url[5:]
+        if "/" not in rest:
+            raise ValueError(f"s3 URL missing key: {url!r}")
+        bucket, _, key = rest.partition("/")
+        if not bucket or not key:
+            raise ValueError(f"s3 URL missing bucket or key: {url!r}")
+        return bucket, key
+
+    async def get_txt_by_url(self, s3_url: str) -> str:
+        """Fetch a UTF-8 text object given a full ``s3://bucket/key`` URL.
+
+        Used to read pre-parsed markdown produced by document-parsing which may
+        live in a different bucket than the data-api default.
+        """
+        bucket, key = self.parse_s3_url(s3_url)
+        return await self.get_txt_file_content(bucket, key)

@@ -28,11 +28,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ChunkRecord:
     id: str
-    content: str
+    content: str                          # text that gets embedded
+    parent_text: str                      # full enclosing section (LLM context)
     document_id: str
     kb_id: str
     doc_name: str
     status: str = "Processing"
+    heading_path: Optional[str] = None
+    token_count: Optional[int] = None
     s3_path: Optional[str] = None
     chunk_s3_url: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -78,7 +81,7 @@ class DocumentPreprocessService:
         doc_repo:   DocumentRepository for document status reads/writes.
         chunk_repo: ChunkRepository for chunk inserts.
         parser:     DocumentParser instance (shared from container).
-        splitter:   DocumentSplitter instance (shared from container).
+        splitter:   MarkdownSplitter instance (shared from container).
     """
 
     def __init__(self, s3, doc_repo, chunk_repo, parser, splitter) -> None:
@@ -97,6 +100,7 @@ class DocumentPreprocessService:
         *,
         upload_chunks: bool = False,
         chunk_bucket: Optional[str] = None,
+        parsed_markdown_s3_url: Optional[str] = None,
     ) -> List[ChunkRecord]:
         """
         Run the full preprocessing pipeline for a document.
@@ -111,6 +115,10 @@ class DocumentPreprocessService:
                            can later fetch the text without reading the DB.
             chunk_bucket:  Destination bucket for chunk uploads.  Required
                            when upload_chunks=True.
+            parsed_markdown_s3_url: Optional full ``s3://bucket/key`` URL of
+                           markdown produced by the document-parsing service.
+                           When supplied, the local parser is skipped — the
+                           markdown is fed straight to the splitter.
 
         Returns:
             List of ChunkRecord objects ready for downstream task dispatch.
@@ -134,17 +142,21 @@ class DocumentPreprocessService:
             )
 
         # ------------------------------------------------------------------
-        # Fetch from S3
+        # Source the text content: pre-parsed markdown (preferred) or fall
+        # back to the local parser on the raw S3 object.
         # ------------------------------------------------------------------
-        logger.info("doc=%s: fetching %s/%s/%s", document_id, bucket, kb_id, name)
-        content = await self.s3.get_file(bucket, f"{kb_id}/{name}")
-
-        # ------------------------------------------------------------------
-        # Parse to plain text
-        # ------------------------------------------------------------------
-        logger.info("doc=%s: parsing '%s'", document_id, name)
-        # Propagates UnsupportedFileTypeError to the caller (task sets Failed)
-        text_content = self.parser.parse(content, name)
+        if parsed_markdown_s3_url:
+            logger.info(
+                "doc=%s: fetching pre-parsed markdown %s",
+                document_id, parsed_markdown_s3_url,
+            )
+            text_content = await self.s3.get_txt_by_url(parsed_markdown_s3_url)
+        else:
+            logger.info("doc=%s: fetching %s/%s/%s", document_id, bucket, kb_id, name)
+            content = await self.s3.get_file(bucket, f"{kb_id}/{name}")
+            logger.info("doc=%s: parsing '%s'", document_id, name)
+            # Propagates UnsupportedFileTypeError to the caller (task sets Failed)
+            text_content = self.parser.parse(content, name)
 
         if not text_content or not text_content.strip():
             logger.warning("doc=%s: empty text after parsing '%s'", document_id, name)
@@ -152,32 +164,33 @@ class DocumentPreprocessService:
             return []
 
         # ------------------------------------------------------------------
-        # Split into chunks
+        # Split into chunks (markdown-aware parent-child)
         # ------------------------------------------------------------------
-        raw_chunks = self.splitter.split(text_content)
-        if not raw_chunks:
+        rows = self.splitter.split(text_content)
+        if not rows:
             logger.warning("doc=%s: no chunks produced from '%s'", document_id, name)
             await self.doc_repo.set_status(document_id, "Failed")
             return []
 
-        logger.info("doc=%s: %d chunks", document_id, len(raw_chunks))
+        logger.info("doc=%s: %d chunks", document_id, len(rows))
 
         # ------------------------------------------------------------------
-        # Build records (+ optional S3 upload for vector path)
+        # Build records. Every chunk is the same shape now — embed text +
+        # inlined ``parent_text`` for LLM context. All start 'Processing'
+        # and progress to 'Succeed' once the embedding lands.
         # ------------------------------------------------------------------
         name_path = _format_name_path(name)
         records: List[ChunkRecord] = []
 
-        for i, raw in enumerate(raw_chunks):
-            chunk_id = str(uuid.uuid4())
+        for row in rows:
             s3_path: Optional[str] = None
             chunk_s3_url: Optional[str] = None
 
             if upload_chunks and chunk_bucket:
-                s3_path = f"{name_path}/{name}_{i}.txt"
+                s3_path = f"{name_path}/{name}_{row.chunk_order_index}.txt"
                 chunk_s3_url = f"s3://{chunk_bucket}/{kb_id}/{s3_path}"
                 await self.s3.upload_file(
-                    raw["content"].encode(),
+                    row.content.encode(),
                     chunk_bucket,
                     kb_id,
                     s3_path,
@@ -185,16 +198,21 @@ class DocumentPreprocessService:
 
             records.append(
                 ChunkRecord(
-                    id=chunk_id,
-                    content=raw["content"],
+                    id=row.id,
+                    content=row.content,
+                    parent_text=row.parent_text,
                     document_id=document_id,
                     kb_id=kb_id,
                     doc_name=name,
+                    status="Processing",
+                    heading_path=row.heading_path,
+                    token_count=row.tokens,
                     s3_path=s3_path,
                     chunk_s3_url=chunk_s3_url,
                     metadata={
-                        "chunk_order_index": raw["chunk_order_index"],
-                        "tokens": raw["tokens"],
+                        "chunk_order_index": row.chunk_order_index,
+                        "tokens": row.tokens,
+                        "heading_path": row.heading_path,
                     },
                 )
             )
@@ -207,10 +225,13 @@ class DocumentPreprocessService:
                 {
                     "id": r.id,
                     "content": r.content,
+                    "parent_text": r.parent_text,
                     "document_id": r.document_id,
                     "kb_id": r.kb_id,
                     "doc_name": r.doc_name,
                     "status": r.status,
+                    "heading_path": r.heading_path,
+                    "token_count": r.token_count,
                     "chunk_s3_url": r.chunk_s3_url,
                 }
                 for r in records

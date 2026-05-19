@@ -28,7 +28,7 @@ from sqlalchemy.pool import NullPool
 
 from app.configurations.configurations import settings
 from app.application.core.parser import DocumentParser
-from app.application.core.splitter import DocumentSplitter
+from app.application.core.markdown_splitter import MarkdownSplitter
 from app.application.services.embedding_service import EmbeddingService
 from app.infrastructure.clients.s3_client_service import S3ClientService
 from app.infrastructure.graph.llm_client import LLMClient
@@ -79,10 +79,10 @@ class WorkerContainer:
         self._s3 = S3ClientService()
 
         self._parser = DocumentParser()
-        self._splitter = DocumentSplitter(
-            model_name=settings.TIKTOKEN_MODEL_NAME,
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP_SIZE,
+        self._splitter = MarkdownSplitter(
+            tokenizer_model=settings.TIKTOKEN_MODEL_NAME,
+            retrieve_max_tokens=settings.RETRIEVE_MAX_TOKENS,
+            retrieve_target_tokens=settings.RETRIEVE_TARGET_TOKENS,
         )
 
         self._embedding_service = EmbeddingService()
@@ -135,7 +135,7 @@ class WorkerContainer:
 
     @property
     def splitter(self) -> Any:
-        """DocumentSplitter with tiktoken encoding loaded once."""
+        """MarkdownSplitter (parent-child) with tiktoken encoding loaded once."""
         self._ensure()
         return self._splitter
 

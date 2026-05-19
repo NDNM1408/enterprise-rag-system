@@ -151,8 +151,8 @@ def graph_preprocess_document(
                 await doc_repo.set_status(document_id, "Failed")
                 return None
 
-            raw_chunks = container.splitter.split(text)
-            if not raw_chunks:
+            rows = container.splitter.split(text)
+            if not rows:
                 logger.warning(
                     "%s doc=%s no chunks from '%s'", log_prefix, document_id, name
                 )
@@ -160,27 +160,31 @@ def graph_preprocess_document(
                 return None
 
             logger.info(
-                "%s doc=%s split into %d chunks", log_prefix, document_id, len(raw_chunks)
+                "%s doc=%s split into %d chunks",
+                log_prefix, document_id, len(rows),
             )
 
             new_records = [
                 {
-                    "id": str(uuid.uuid4()),
-                    "content": chunk["content"],
+                    "id": r.id,
+                    "content": r.content,
+                    "parent_text": r.parent_text,
                     "document_id": document_id,
                     "kb_id": knowledge_base_id,
                     "doc_name": name,
                     "status": "Processing",
+                    "heading_path": r.heading_path,
+                    "token_count": r.tokens,
                     "chunk_s3_url": None,
                 }
-                for chunk in raw_chunks
+                for r in rows
             ]
             await chunk_repo.batch_insert(new_records)
             await doc_repo.set_status(document_id, "Processing")
             all_chunks = new_records
 
         # ------------------------------------------------------------------
-        # Filter to only non-Succeed chunks (idempotency on dispatch retry)
+        # Filter to chunks still pending graph ingestion.
         # ------------------------------------------------------------------
         pending = [c for c in all_chunks if c.get("status") != "Succeed"]
 

@@ -2,15 +2,21 @@
 
 import hashlib
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+import httpx
 from fastapi import UploadFile
 from app.exceptions import ConflictError, ResourceNotFoundError, ExternalServiceError
 from app.infrastructure.connectors.postgres.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.infrastructure.connectors.postgres.repositories.document_repository import DocumentRepository
 from app.infrastructure.connectors.postgres.repositories.chunk_repository import ChunkRepository
-from app.infrastructure.connectors.postgres.schema import Document
+from app.infrastructure.connectors.postgres.schema import (
+    Document,
+    IngestingStatus,
+    ParsingStatus,
+)
 from app.infrastructure.clients.s3_client_service import S3ClientService
 from app.celery_client import send_preprocess_task, send_graph_preprocess_task
 from app.configurations.configurations import settings
@@ -18,6 +24,20 @@ from app.configurations.configurations import settings
 import asyncio
 
 logger = logging.getLogger(__name__)
+
+
+# File extensions that already produce markdown-compatible text — the
+# data-processing-job worker can handle these natively via its local
+# DocumentParser, so we skip the document-parsing service round-trip.
+NATIVE_TEXT_EXTENSIONS = {".md", ".markdown", ".html", ".htm", ".txt"}
+
+
+def _extension(filename: str) -> str:
+    return Path(filename or "").suffix.lower()
+
+
+def _is_native_text(filename: str) -> bool:
+    return _extension(filename) in NATIVE_TEXT_EXTENSIONS
 
 
 async def _graphrag_delete_document_graph(
@@ -261,9 +281,11 @@ class DocumentsService:
         except Exception as exc:
             raise ExternalServiceError("S3", f"Failed to upload files: {exc}") from exc
 
-        # 6. Create document records with s3_url and etag
-        documents = [
-            Document(
+        # 6. Build document records — each starts in its appropriate parsing phase.
+        documents: List[Document] = []
+        for file, etag in zip(files, file_etags):
+            native = _is_native_text(file.filename)
+            documents.append(Document(
                 id=str(uuid4()),
                 kb_id=kb_id,
                 name=file.filename,
@@ -271,12 +293,14 @@ class DocumentsService:
                 status="Created",
                 s3_url=f"s3://{settings.BUCKET_NAME}/{kb_id}/{file.filename}",
                 etag=etag,
-            )
-            for file, etag in zip(files, file_etags)
-        ]
+                parsing_status=(ParsingStatus.Skipped if native else ParsingStatus.Pending).value,
+                parsing_progress=100 if native else 0,
+                ingesting_status=IngestingStatus.Pending.value,
+                ingesting_progress=0,
+            ))
         await self.document_repository.bulk_create(documents)
 
-        # 6. Enqueue preprocessing tasks (classic RAG or GraphRAG depending on KB config)
+        # 7. Route each document: GraphRAG, direct preprocess (native), or parse+preprocess.
         rag_mode = (knowledge_base.parser_config or {}).get("rag_mode", "classic")
 
         for doc in documents:
@@ -294,10 +318,12 @@ class DocumentsService:
                     bucket=settings.BUCKET_NAME,
                     correlation_id=correlation_id,
                 )
-            else:
+                continue
+
+            if _is_native_text(doc.name):
                 logger.info(
-                    f"Enqueueing preprocess task for document {doc.id} "
-                    f"[rag_mode=classic correlation_id={correlation_id}]"
+                    f"Native text format — skipping parse, dispatching preprocess directly "
+                    f"for document {doc.id} [correlation_id={correlation_id}]"
                 )
                 send_preprocess_task(
                     document_id=doc.id,
@@ -307,6 +333,156 @@ class DocumentsService:
                     bucket=settings.BUCKET_NAME,
                     correlation_id=correlation_id,
                 )
+            else:
+                logger.info(
+                    f"Submitting parse job for document {doc.id} "
+                    f"[ext={_extension(doc.name)} correlation_id={correlation_id}]"
+                )
+                try:
+                    job_id = await self._submit_parse_job(
+                        document_id=doc.id,
+                        filename=doc.name,
+                        source_url=doc.s3_url,
+                    )
+                    await self.document_repository.update_fields(
+                        doc.id,
+                        {"parsing_job_id": job_id},
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Failed to submit parse job for document {doc.id}: {exc}",
+                        exc_info=True,
+                    )
+                    await self.document_repository.update_fields(
+                        doc.id,
+                        {
+                            "parsing_status": ParsingStatus.Failed.value,
+                            "parsing_error": f"submit failed: {exc}",
+                            "status": "Failed",
+                        },
+                    )
+
+    async def _submit_parse_job(
+        self,
+        document_id: str,
+        filename: str,
+        source_url: str,
+    ) -> str:
+        """
+        Ask the document-parsing service to parse a file already in S3.
+
+        Returns the ParsingJob id (UUID string). Raises on transport / non-2xx.
+        """
+        callback_url = (
+            f"{settings.DOCUMENT_PARSING_CALLBACK_BASE.rstrip('/')}"
+            f"/api/v1/internal/parse-callback"
+        )
+        payload = {
+            "filename": filename,
+            "source_url": source_url,
+            "callback_url": callback_url,
+            "external_document_id": document_id,
+        }
+        url = f"{settings.DOCUMENT_PARSING_URL.rstrip('/')}/api/v1/jobs/by-reference"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        job_id = data.get("id") or data.get("job_id")
+        if not job_id:
+            raise ExternalServiceError(
+                "document-parsing",
+                f"submit returned no job id: {data}",
+            )
+        return str(job_id)
+
+    async def handle_parse_callback(self, payload: Dict[str, Any]) -> None:
+        """
+        Apply a parse status update from the document-parsing service.
+
+        Expected payload keys:
+            job_id:           ParsingJob id
+            state:            "running" | "done" | "failed"
+            pages_done:       int   (optional)
+            pages_total:      int   (optional)
+            s3_markdown_url:  str   (full s3://bucket/key, present when state=done)
+            error:            str   (present when state=failed)
+
+        Side-effects:
+            - Updates parsing_status / parsing_progress / parsed_markdown_s3_key / parsing_error
+            - On state=done: dispatches preprocess_document so chunking starts
+            - On state=failed: rolls the legacy `status` column up to Failed
+        """
+        job_id = payload.get("job_id") or payload.get("id")
+        if not job_id:
+            logger.warning("parse-callback: missing job_id, payload=%s", payload)
+            return
+
+        doc = await self.document_repository.get_by_parsing_job_id(str(job_id))
+        if doc is None:
+            logger.warning("parse-callback: no document for parsing_job_id=%s", job_id)
+            return
+
+        state = (payload.get("state") or "").lower()
+        pages_done = payload.get("pages_done") or 0
+        pages_total = payload.get("pages_total") or 0
+        progress_pct = 0
+        if pages_total and pages_total > 0:
+            progress_pct = min(100, max(0, int(round(100.0 * pages_done / pages_total))))
+
+        if state == "running":
+            await self.document_repository.update_fields(
+                doc.id,
+                {
+                    "parsing_status": ParsingStatus.Parsing.value,
+                    "parsing_progress": progress_pct,
+                    "status": "Processing",
+                },
+            )
+            return
+
+        if state == "failed":
+            await self.document_repository.update_fields(
+                doc.id,
+                {
+                    "parsing_status": ParsingStatus.Failed.value,
+                    "parsing_error": (payload.get("error") or "")[:8000],
+                    "status": "Failed",
+                },
+            )
+            return
+
+        if state == "done":
+            markdown_url = payload.get("s3_markdown_url") or payload.get("markdown_url")
+            await self.document_repository.update_fields(
+                doc.id,
+                {
+                    "parsing_status": ParsingStatus.Parsed.value,
+                    "parsing_progress": 100,
+                    "parsed_markdown_s3_key": markdown_url,
+                    "status": "Processing",
+                },
+            )
+
+            # Hand off to the chunk/embed pipeline.
+            knowledge_base = await self.knowledge_base_repository.get(id=doc.kb_id)
+            correlation_id = str(uuid4())
+            logger.info(
+                f"Parse done for document {doc.id} — dispatching preprocess "
+                f"[markdown_url={markdown_url} correlation_id={correlation_id}]"
+            )
+            send_preprocess_task(
+                document_id=doc.id,
+                knowledge_base_id=doc.kb_id,
+                name=doc.name,
+                embedding_model_id=knowledge_base.embed_id,
+                bucket=settings.BUCKET_NAME,
+                correlation_id=correlation_id,
+                parsed_markdown_s3_url=markdown_url,
+            )
+            return
+
+        logger.warning("parse-callback: ignoring unknown state=%s for job %s", state, job_id)
 
     async def list_documents(self, kb_id: str) -> List[Dict[str, Any]]:
         """
@@ -324,6 +500,11 @@ class DocumentsService:
                 "name": doc.name,
                 "kb_id": doc.kb_id,
                 "status": doc.status if isinstance(doc.status, str) else doc.status.value,
+                "parsing_status": doc.parsing_status,
+                "parsing_progress": doc.parsing_progress,
+                "parsing_error": doc.parsing_error,
+                "ingesting_status": doc.ingesting_status,
+                "ingesting_progress": doc.ingesting_progress,
                 "etag": doc.etag,
                 "cmetadata": doc.cmetadata,
                 "create_time": doc.create_time.isoformat() if doc.create_time else None,

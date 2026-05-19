@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.6
+# Worker container: Celery consumer with the full MinerU stack
+# (torch CPU + vietocr + transformers + ONNX). Mounts the MinerU source +
+# weights from the host at /opt/mineru.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        poppler-utils \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxrender1 \
+        libxext6 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_DEFAULT_TIMEOUT=600 \
+    PIP_RETRIES=15 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+COPY requirements.txt requirements-mineru.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip wheel "setuptools<70"
+
+# torch CPU-only (saves ~500MB vs default cuda wheel).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        --extra-index-url https://pypi.org/simple \
+        "torch>=2.2,<2.7" \
+        "torchvision>=0.17,<0.22"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-mineru.txt
+
+# Re-pin setuptools last — torch + transformers each pull a newer setuptools
+# that drops pkg_resources, which gdown 4.x (vietocr → gdown) still imports.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "setuptools<70" --force-reinstall
+
+COPY src/ ./src/
+COPY alembic.ini ./alembic.ini
+COPY migrations/ ./migrations/
+COPY docker-entrypoint-worker.sh docker-entrypoint-api.sh ./
+RUN chmod +x ./docker-entrypoint-worker.sh ./docker-entrypoint-api.sh
+
+ENV MINERU_MODELS_DIR=/opt/mineru/models_onnx \
+    PORT=8002 \
+    PYTHONPATH=/app/src:/app/src/vendored
+
+EXPOSE 8002
+
+# Default CMD = worker. The API service in docker-compose overrides
+# this with ./docker-entrypoint-api.sh.
+CMD ["./docker-entrypoint-worker.sh"]
