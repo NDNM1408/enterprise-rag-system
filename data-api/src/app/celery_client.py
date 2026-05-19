@@ -57,7 +57,8 @@ def send_graph_preprocess_task(
 
 
 def send_preprocess_task(document_id: str, knowledge_base_id: str, name: str,
-                        embedding_model_id: str, bucket: str, correlation_id: str = None):
+                        embedding_model_id: str, bucket: str, correlation_id: str = None,
+                        parsed_markdown_s3_url: Optional[str] = None):
     """
     Send preprocess_document task to worker queue.
 
@@ -68,6 +69,10 @@ def send_preprocess_task(document_id: str, knowledge_base_id: str, name: str,
         embedding_model_id: ID of embedding model
         bucket: S3 bucket name
         correlation_id: Optional correlation ID for tracing
+        parsed_markdown_s3_url: Optional pre-parsed markdown S3 URL (full s3://bucket/key).
+            When provided, the worker skips its local parser and chunks the
+            markdown content directly. Used after the document-parsing service
+            finishes producing markdown for non-native formats (PDF, DOCX, ...).
 
     Returns:
         AsyncResult object
@@ -80,7 +85,8 @@ def send_preprocess_task(document_id: str, knowledge_base_id: str, name: str,
             'name': name,
             'embedding_model_id': embedding_model_id,
             'bucket': bucket,
-            'correlation_id': correlation_id
+            'correlation_id': correlation_id,
+            'parsed_markdown_s3_url': parsed_markdown_s3_url,
         },
         queue='preprocess_queue',
         routing_key='preprocess.document'

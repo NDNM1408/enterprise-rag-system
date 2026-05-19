@@ -63,6 +63,7 @@ class DocumentEmbeddingsRepository:
                 id AS chunk_id,
                 document_id,
                 content AS text,
+                parent_text,
                 metadata,
                 1 - (embedding <=> CAST(:query_embedding AS vector)) AS similarity
             FROM "chunk"
@@ -94,6 +95,7 @@ class DocumentEmbeddingsRepository:
                     'chunk_id': str(row.chunk_id),
                     'document_id': str(row.document_id),
                     'text': row.text,
+                    'parent_text': row.parent_text,
                     'metadata': row.metadata,
                     'similarity': float(row.similarity)
                 }
@@ -135,6 +137,7 @@ class DocumentEmbeddingsRepository:
                     id AS chunk_id,
                     document_id,
                     content AS text,
+                    parent_text,
                     metadata,
                     1 - (embedding <=> CAST(:query_embedding AS vector)) AS vector_similarity
                 FROM "chunk"
@@ -149,6 +152,7 @@ class DocumentEmbeddingsRepository:
                     id AS chunk_id,
                     document_id,
                     content AS text,
+                    parent_text,
                     metadata,
                     ts_rank(text_tsvector, to_tsquery('english', :query_text)) AS text_rank
                 FROM "chunk"
@@ -162,6 +166,7 @@ class DocumentEmbeddingsRepository:
                 COALESCE(v.chunk_id, t.chunk_id) AS chunk_id,
                 COALESCE(v.document_id, t.document_id) AS document_id,
                 COALESCE(v.text, t.text) AS text,
+                COALESCE(v.parent_text, t.parent_text) AS parent_text,
                 COALESCE(v.metadata, t.metadata) AS metadata,
                 COALESCE(v.vector_similarity, 0) * :alpha + COALESCE(t.text_rank, 0) * :beta AS combined_score
             FROM vector_results v
@@ -188,6 +193,7 @@ class DocumentEmbeddingsRepository:
                     'chunk_id': str(row.chunk_id),
                     'document_id': str(row.document_id),
                     'text': row.text,
+                    'parent_text': row.parent_text,
                     'metadata': row.metadata,
                     'score': float(row.combined_score)
                 }
@@ -225,6 +231,7 @@ class DocumentEmbeddingsRepository:
                 id AS chunk_id,
                 document_id,
                 content AS text,
+                parent_text,
                 metadata,
                 similarity(content, :query_text) AS similarity
             FROM "chunk"
@@ -250,6 +257,7 @@ class DocumentEmbeddingsRepository:
                     'chunk_id': str(row.chunk_id),
                     'document_id': str(row.document_id),
                     'text': row.text,
+                    'parent_text': row.parent_text,
                     'metadata': row.metadata,
                     'similarity': float(row.similarity)
                 }

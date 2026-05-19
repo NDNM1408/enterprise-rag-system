@@ -46,22 +46,30 @@ def preprocess_document(
     embedding_model_id: str,
     bucket: str,
     correlation_id: str = None,
+    parsed_markdown_s3_url: str = None,
 ):
     """
-    Fetch a document from S3, parse it, split it into chunks, store the
-    chunks in the database and S3, then dispatch a chord of upsert_chunk
-    tasks followed by finalize_document.
+    Fetch a document (or its pre-parsed markdown) from S3, split it into
+    chunks, store the chunks in the database and S3, then dispatch a chord of
+    upsert_chunk tasks followed by finalize_document.
 
     Args:
         document_id:       UUID of the document record.
         knowledge_base_id: UUID of the knowledge base.
-        name:              Document filename (determines parser).
+        name:              Document filename (determines parser when no
+                           pre-parsed markdown is provided).
         embedding_model_id: ID of the embedding model (passed through for audit).
         bucket:            S3 bucket containing the raw document.
         correlation_id:    Optional tracing / correlation ID.
+        parsed_markdown_s3_url: Optional full ``s3://bucket/key`` URL of
+                           pre-parsed markdown produced by the document-parsing
+                           service. When provided the local parser is skipped.
     """
     log_prefix = f"[{correlation_id}]" if correlation_id else ""
-    logger.info("%s preprocess_document starting: doc=%s", log_prefix, document_id)
+    logger.info(
+        "%s preprocess_document starting: doc=%s parsed_md=%s",
+        log_prefix, document_id, bool(parsed_markdown_s3_url),
+    )
 
     async def _run():
         start = time.time()
@@ -75,6 +83,11 @@ def preprocess_document(
             splitter=container.splitter,
         )
 
+        # Surface the ingestion phase to the UI as soon as we pick the task up.
+        await doc_repo.set_ingesting(
+            document_id, status="Processing", progress=5,
+        )
+
         try:
             chunk_records = await svc.preprocess(
                 document_id=document_id,
@@ -83,6 +96,7 @@ def preprocess_document(
                 bucket=bucket,
                 upload_chunks=True,
                 chunk_bucket=settings.UPSERT_BUCKET_NAME,
+                parsed_markdown_s3_url=parsed_markdown_s3_url,
             )
         except DocumentNotFoundError:
             logger.warning("%s doc=%s not found, skipping", log_prefix, document_id)
@@ -93,6 +107,7 @@ def preprocess_document(
         except UnsupportedFileTypeError as e:
             logger.warning("%s doc=%s unsupported file '%s': %s", log_prefix, document_id, name, e)
             await doc_repo.set_status(document_id, "Failed")
+            await doc_repo.finalize_ingesting(document_id, success=False)
             return []
         except Exception as e:
             logger.error(
@@ -100,9 +115,13 @@ def preprocess_document(
             )
             try:
                 await doc_repo.set_status(document_id, "Failed")
+                await doc_repo.finalize_ingesting(document_id, success=False)
             except Exception:
                 pass
             raise
+
+        # All chunks persisted; embeddings haven't started yet.
+        await doc_repo.set_ingesting(document_id, progress=20)
 
         logger.info(
             "%s doc=%s preprocessing done in %.2fs, %d chunks",
@@ -116,6 +135,8 @@ def preprocess_document(
         if not chunk_records:
             return {"chunk_count": 0, "document_id": document_id}
 
+        # Every chunk in the denormalized model gets embedded — no
+        # separate parent rows to skip.
         from app.celery_app.tasks.upsert_tasks import upsert_chunk
 
         chord(
@@ -140,7 +161,10 @@ def preprocess_document(
             "%s doc=%s dispatched chord: %d upsert tasks → finalize",
             log_prefix, document_id, len(chunk_records),
         )
-        return {"chunk_count": len(chunk_records), "document_id": document_id}
+        return {
+            "chunk_count": len(chunk_records),
+            "document_id": document_id,
+        }
 
     except Exception as e:
         logger.error("%s doc=%s task failed: %s", log_prefix, document_id, e)
@@ -171,10 +195,11 @@ def finalize_document(self, document_id: str, correlation_id: str = None):
         doc_repo = DocumentRepository(container.session_factory)
 
         not_succeed = await chunk_repo.count_non_succeeded(document_id)
-        final_status = "Succeed" if not_succeed == 0 else "Failed"
-        await doc_repo.set_status(document_id, final_status)
+        success = not_succeed == 0
+        # Atomic write: rollup ``status`` + terminal ingesting state in one UPDATE.
+        await doc_repo.finalize_ingesting(document_id, success=success)
 
-        if not_succeed == 0:
+        if success:
             logger.info("%s doc=%s marked Succeed", log_prefix, document_id)
         else:
             logger.warning(

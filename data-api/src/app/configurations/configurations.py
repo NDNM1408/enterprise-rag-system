@@ -69,6 +69,16 @@ class Settings(BaseSettings):
     POSTGRES_PASSWORD: str = Field(default="datahub", description="Postgres password for GraphRAG")
     POSTGRES_DATABASE: str = Field(default="datahub", description="Postgres database for GraphRAG")
 
+    # Document parsing service
+    DOCUMENT_PARSING_URL: str = Field(
+        default="http://document-parsing:8002",
+        description="Base URL of the document-parsing service (internal network)"
+    )
+    DOCUMENT_PARSING_CALLBACK_BASE: str = Field(
+        default="http://data-api:8000",
+        description="Base URL data-api is reachable at from document-parsing (used to build callback_url)"
+    )
+
     # Server
     PORT: int = Field(default=8000, ge=1, le=65535)
     MODE: str = Field(default="prod", description="Application mode: 'dev' or 'prod'")

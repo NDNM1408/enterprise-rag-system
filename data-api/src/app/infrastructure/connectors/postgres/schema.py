@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Column,
+    Integer,
     String,
     Enum as SQLAlchemyEnum,
     Text,
@@ -23,6 +24,22 @@ class DocumentStatus(enum.Enum):
     Processing = "Processing"
     Succeed = "Succeed"
     Failed = "Failed"
+
+
+class ParsingStatus(str, enum.Enum):
+    Pending = "Pending"
+    Parsing = "Parsing"
+    Parsed = "Parsed"
+    Skipped = "Skipped"
+    Failed = "Failed"
+
+
+class IngestingStatus(str, enum.Enum):
+    Pending = "Pending"
+    Processing = "Processing"
+    Succeed = "Succeed"
+    Failed = "Failed"
+
 
 class ChunkStatus(enum.Enum):
     Processing = "Processing"
@@ -71,6 +88,14 @@ class Document(Base):
     s3_url = Column(String)
     etag = Column(String)
 
+    parsing_status = Column(String(32), nullable=False, default=ParsingStatus.Pending.value)
+    parsing_progress = Column(Integer, nullable=False, default=0)
+    parsing_job_id = Column(String, nullable=True)
+    parsed_markdown_s3_key = Column(String, nullable=True)
+    parsing_error = Column(Text, nullable=True)
+    ingesting_status = Column(String(32), nullable=False, default=IngestingStatus.Pending.value)
+    ingesting_progress = Column(Integer, nullable=False, default=0)
+
     # Relationships
     knowledgebase = relationship("KnowledgeBase", back_populates="documents")
     chunks = relationship(
@@ -87,6 +112,7 @@ class Chunk(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), unique=True, nullable=False)
     content = Column(Text)
+    parent_text = Column(Text)
     document_id = Column(String, ForeignKey(f"{schema}.document.id", ondelete="CASCADE"))
     kb_id = Column(String, ForeignKey(f"{schema}.knowledge_base.id", ondelete="CASCADE"))
     doc_name = Column(String)

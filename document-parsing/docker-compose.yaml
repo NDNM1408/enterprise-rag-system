@@ -1,0 +1,151 @@
+# Full stack — postgres + rabbitmq + minio + API + Celery worker.
+# Async /jobs flow works end-to-end. Sync /parse, /parse-image, /health also work.
+#
+# External ports avoid the root docker-compose.yaml (postgres:5435, rabbitmq:5672,
+# minio:9000) so both stacks can run side-by-side.
+#
+# Bring up:
+#   docker compose up -d
+#   curl http://localhost:8103/api/v1/health | jq .
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: doc-parsing-postgres
+    ports:
+      - "5436:5432"
+    environment:
+      POSTGRES_USER: datahub
+      POSTGRES_PASSWORD: datahub
+      POSTGRES_DB: datahub
+    volumes:
+      - doc-parsing-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datahub -d datahub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: doc-parsing-rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: doc-parsing-minio
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - doc-parsing-minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  document-parsing-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: doc-parsing-api
+    command: ["./docker-entrypoint-api.sh"]
+    ports:
+      - "8103:8002"
+    environment:
+      PORT: 8002
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      DATABASE_URL: postgresql://datahub:datahub@postgres:5432/datahub
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-document-parsing}
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      MINERU_MODELS_DIR: /opt/mineru/models_onnx
+      MINERU_DPI: ${MINERU_DPI:-200}
+      PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
+      PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cpu}
+      DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cpu}
+      DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cpu}
+      DEVICE_ORIENT: ${DEVICE_ORIENT:-cpu}
+      DEVICE_TABLE_CLS: ${DEVICE_TABLE_CLS:-cpu}
+      DEVICE_TABLE_REC: ${DEVICE_TABLE_REC:-cpu}
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./src:/app/src:ro
+      - ./models/models_onnx:/opt/mineru/models_onnx:ro
+      - ./models/vietocr:/root/.cache/vietocr:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  document-parsing-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: doc-parsing-worker
+    # Default CMD in Dockerfile is ./docker-entrypoint-worker.sh
+    environment:
+      CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
+      CELERY_QUEUE: ${CELERY_QUEUE:-parse_queue}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://datahub:datahub@postgres:5432/datahub
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-document-parsing}
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      MINERU_MODELS_DIR: /opt/mineru/models_onnx
+      MINERU_DPI: ${MINERU_DPI:-200}
+      PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
+      PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cpu}
+      DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cpu}
+      DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cpu}
+      DEVICE_ORIENT: ${DEVICE_ORIENT:-cpu}
+      DEVICE_TABLE_CLS: ${DEVICE_TABLE_CLS:-cpu}
+      DEVICE_TABLE_REC: ${DEVICE_TABLE_REC:-cpu}
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./src:/app/src:ro
+      - ./models/models_onnx:/opt/mineru/models_onnx:ro
+      - ./models/vietocr:/root/.cache/vietocr:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      document-parsing-api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  doc-parsing-pg-data:
+  doc-parsing-minio-data:

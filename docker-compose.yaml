@@ -85,6 +85,9 @@ services:
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_DEFAULT_REGION: ap-southeast-1
       AWS_SESSION_TOKEN: ""
+      # Document-parsing orchestrator wiring
+      DOCUMENT_PARSING_URL: http://document-parsing-api:8002
+      DOCUMENT_PARSING_CALLBACK_BASE: http://data-api:8000
     volumes:
       - ./data-api/src:/app/src:ro
     depends_on:
@@ -94,6 +97,97 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      document-parsing-api:
+        condition: service_started
+    restart: unless-stopped
+
+  document-parsing-api:
+    build:
+      context: ./document-parsing
+      dockerfile: Dockerfile
+    container_name: document-parsing-api
+    command: ["./docker-entrypoint-api.sh"]
+    ports:
+      - "8002:8002"
+    environment:
+      PORT: 8002
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      # Share the same Postgres — document-parsing migrations create the
+      # `parsing` schema next to data-api's `public` schema.
+      DATABASE_URL: postgresql://datahub:datahub@postgres:5432/datahub
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${DOCUMENT_PARSING_BUCKET:-document-parsing}
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      MINERU_MODELS_DIR: /opt/mineru/models_onnx
+      MINERU_DPI: ${MINERU_DPI:-200}
+      PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
+      PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cpu}
+      DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cpu}
+      DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cpu}
+      DEVICE_ORIENT: ${DEVICE_ORIENT:-cpu}
+      DEVICE_TABLE_CLS: ${DEVICE_TABLE_CLS:-cpu}
+      DEVICE_TABLE_REC: ${DEVICE_TABLE_REC:-cpu}
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./document-parsing/src:/app/src:ro
+      - ./document-parsing/models/models_onnx:/opt/mineru/models_onnx:ro
+      - ./document-parsing/models/vietocr:/root/.cache/vietocr:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  document-parsing-worker:
+    build:
+      context: ./document-parsing
+      dockerfile: Dockerfile
+    container_name: document-parsing-worker
+    # Default CMD in Dockerfile is ./docker-entrypoint-worker.sh
+    environment:
+      CELERY_CONCURRENCY: ${DOCUMENT_PARSING_CONCURRENCY:-2}
+      CELERY_QUEUE: ${CELERY_QUEUE:-parse_queue}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://datahub:datahub@postgres:5432/datahub
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${DOCUMENT_PARSING_BUCKET:-document-parsing}
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      MINERU_MODELS_DIR: /opt/mineru/models_onnx
+      MINERU_DPI: ${MINERU_DPI:-200}
+      PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
+      PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cpu}
+      DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cpu}
+      DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cpu}
+      DEVICE_ORIENT: ${DEVICE_ORIENT:-cpu}
+      DEVICE_TABLE_CLS: ${DEVICE_TABLE_CLS:-cpu}
+      DEVICE_TABLE_REC: ${DEVICE_TABLE_REC:-cpu}
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./document-parsing/src:/app/src:ro
+      - ./document-parsing/models/models_onnx:/opt/mineru/models_onnx:ro
+      - ./document-parsing/models/vietocr:/root/.cache/vietocr:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      document-parsing-api:
+        condition: service_started
     restart: unless-stopped
 
   # data-processing-job:

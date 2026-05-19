@@ -1,9 +1,9 @@
 """Repository for document CRUD operations."""
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import delete as sqla_delete, select, and_, or_, func
+from sqlalchemy import delete as sqla_delete, select, update as sqla_update, and_, or_, func
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.infrastructure.connectors.postgres.database import db_session
@@ -181,6 +181,49 @@ class DocumentRepository:
         except SQLAlchemyError as exc:
             logger.error(f"Database error in delete_by_kb_id: {exc}")
             raise DatabaseError(f"Failed to delete documents: {exc}") from exc
+
+    async def update_fields(self, doc_id: str, fields: Dict[str, Any]) -> bool:
+        """
+        Update a subset of columns on a document row.
+
+        Returns True if at least one row matched.
+
+        Raises:
+            DatabaseError: On DB failure
+        """
+        if not fields:
+            return False
+        try:
+            async with self.async_session() as session:
+                async with session.begin():
+                    result = await session.execute(
+                        sqla_update(Document)
+                        .where(Document.id == doc_id)
+                        .values(**fields)
+                    )
+            return result.rowcount > 0
+        except SQLAlchemyError as exc:
+            logger.error(f"Database error in update_fields: {exc}")
+            raise DatabaseError(f"Failed to update document {doc_id}: {exc}") from exc
+
+    async def get_by_parsing_job_id(self, job_id: str) -> Optional[Document]:
+        """
+        Fetch the document referenced by a document-parsing ParsingJob id.
+
+        Returns None when no document references this job (stale callback).
+
+        Raises:
+            DatabaseError: On DB failure
+        """
+        try:
+            async with self.async_session() as session:
+                result = await session.execute(
+                    select(Document).where(Document.parsing_job_id == job_id)
+                )
+                return result.scalars().first()
+        except SQLAlchemyError as exc:
+            logger.error(f"Database error in get_by_parsing_job_id: {exc}")
+            raise DatabaseError(f"Failed to lookup document by parsing_job_id: {exc}") from exc
 
     async def get_s3_urls_by_kb_id(self, kb_id: str) -> List[str]:
         """

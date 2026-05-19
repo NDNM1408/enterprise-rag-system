@@ -30,6 +30,8 @@ export interface UpdateKbRequest {
 
 // Document types
 export type DocumentStatus = "Created" | "Processing" | "Succeed" | "Failed";
+export type ParsingStatus = "Pending" | "Parsing" | "Parsed" | "Skipped" | "Failed";
+export type IngestingStatus = "Pending" | "Processing" | "Succeed" | "Failed";
 
 export interface Document {
   id: string;
@@ -37,6 +39,11 @@ export interface Document {
   name: string;
   s3_url?: string;
   status: DocumentStatus;
+  parsing_status?: ParsingStatus;
+  parsing_progress?: number;       // 0-100
+  parsing_error?: string | null;
+  ingesting_status?: IngestingStatus;
+  ingesting_progress?: number;     // 0-100
   create_time: string;
   update_time: string;
   cmetadata?: Record<string, unknown>;

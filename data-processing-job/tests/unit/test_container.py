@@ -23,7 +23,7 @@ class TestWorkerContainer:
     # ------------------------------------------------------------------
 
     @patch("app.container.S3ClientService")
-    @patch("app.container.DocumentSplitter")
+    @patch("app.container.MarkdownSplitter")
     @patch("app.container.DocumentParser")
     @patch("app.container.EmbeddingService")
     @patch("app.container.async_sessionmaker")
@@ -37,7 +37,7 @@ class TestWorkerContainer:
         assert c._initialized
 
     @patch("app.container.S3ClientService")
-    @patch("app.container.DocumentSplitter")
+    @patch("app.container.MarkdownSplitter")
     @patch("app.container.DocumentParser")
     @patch("app.container.EmbeddingService")
     @patch("app.container.async_sessionmaker")
@@ -53,7 +53,7 @@ class TestWorkerContainer:
         mock_s3.assert_called_once()
 
     @patch("app.container.S3ClientService")
-    @patch("app.container.DocumentSplitter")
+    @patch("app.container.MarkdownSplitter")
     @patch("app.container.DocumentParser")
     @patch("app.container.EmbeddingService")
     @patch("app.container.async_sessionmaker")
@@ -71,7 +71,7 @@ class TestWorkerContainer:
         assert c.embedding_service is c.embedding_service
 
     @patch("app.container.S3ClientService")
-    @patch("app.container.DocumentSplitter")
+    @patch("app.container.MarkdownSplitter")
     @patch("app.container.DocumentParser")
     @patch("app.container.EmbeddingService")
     @patch("app.container.async_sessionmaker")
@@ -86,7 +86,7 @@ class TestWorkerContainer:
         assert c._initialized
 
     @patch("app.container.S3ClientService")
-    @patch("app.container.DocumentSplitter")
+    @patch("app.container.MarkdownSplitter")
     @patch("app.container.DocumentParser")
     @patch("app.container.EmbeddingService")
     @patch("app.container.async_sessionmaker")
@@ -102,7 +102,7 @@ class TestWorkerContainer:
         assert kwargs.get("poolclass") is NullPool
 
     @patch("app.container.S3ClientService")
-    @patch("app.container.DocumentSplitter")
+    @patch("app.container.MarkdownSplitter")
     @patch("app.container.DocumentParser")
     @patch("app.container.EmbeddingService")
     @patch("app.container.async_sessionmaker")
@@ -110,12 +110,12 @@ class TestWorkerContainer:
     def test_splitter_uses_settings(
         self, mock_engine, mock_sm, mock_emb, mock_parser, mock_splitter, mock_s3
     ):
-        """DocumentSplitter must receive values from settings."""
+        """MarkdownSplitter must receive values from settings."""
         from app.configurations.configurations import settings
         c = self._fresh_container()
         c.init()
         mock_splitter.assert_called_once_with(
-            model_name=settings.TIKTOKEN_MODEL_NAME,
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP_SIZE,
+            tokenizer_model=settings.TIKTOKEN_MODEL_NAME,
+            retrieve_max_tokens=settings.RETRIEVE_MAX_TOKENS,
+            retrieve_target_tokens=settings.RETRIEVE_TARGET_TOKENS,
         )

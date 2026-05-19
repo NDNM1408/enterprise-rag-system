@@ -1,0 +1,3 @@
+# Model weights are mounted into the worker container at runtime.
+# Too large for git (multi-hundred-MB .onnx / .pth / .safetensors blobs).
+models/

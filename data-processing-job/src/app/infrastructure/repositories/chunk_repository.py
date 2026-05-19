@@ -51,12 +51,13 @@ class ChunkRepository:
             return result.scalar() or 0
 
     async def get_by_document(self, document_id: str) -> List[Dict[str, Any]]:
-        """Return all chunks for a document as dicts with id, content, status."""
+        """Return all chunks for a document as dicts with id, content,
+        parent_text, status, heading_path."""
         async with self._sf() as session:
             result = await session.execute(
                 text(
-                    "SELECT id, content, status FROM chunk "
-                    "WHERE document_id = :document_id"
+                    "SELECT id, content, parent_text, status, heading_path "
+                    "FROM chunk WHERE document_id = :document_id"
                 ),
                 {"document_id": document_id},
             )
@@ -66,30 +67,40 @@ class ChunkRepository:
         """
         Batch-insert chunk records in a single statement.
 
-        Each record must have keys: id, content, document_id, kb_id,
-        doc_name, status.  chunk_s3_url is optional (defaults to None).
+        Required keys: id, content, document_id, kb_id, doc_name, status.
+        Optional: parent_text, chunk_s3_url, heading_path, token_count.
+
+        Every chunk is a retrieve chunk in the denormalized model — the
+        full enclosing section travels inline as ``parent_text`` so the
+        LLM context query becomes a single-row read, no FK follow.
         """
         if not records:
             return
 
+        cols = (
+            "id", "content", "parent_text", "document_id", "kb_id", "doc_name",
+            "status", "heading_path", "token_count", "chunk_s3_url",
+        )
         placeholders = ", ".join(
-            f"(:id_{i}, :content_{i}, :document_id_{i}, :kb_id_{i}, "
-            f":doc_name_{i}, :status_{i}, :chunk_s3_url_{i})"
+            "(" + ", ".join(f":{c}_{i}" for c in cols) + ")"
             for i in range(len(records))
         )
         params: Dict[str, Any] = {}
         for i, rec in enumerate(records):
             params[f"id_{i}"] = rec["id"]
             params[f"content_{i}"] = rec["content"]
+            params[f"parent_text_{i}"] = rec.get("parent_text")
             params[f"document_id_{i}"] = rec["document_id"]
             params[f"kb_id_{i}"] = rec["kb_id"]
             params[f"doc_name_{i}"] = rec["doc_name"]
             params[f"status_{i}"] = rec.get("status", "Processing")
+            params[f"heading_path_{i}"] = rec.get("heading_path")
+            params[f"token_count_{i}"] = rec.get("token_count")
             params[f"chunk_s3_url_{i}"] = rec.get("chunk_s3_url")
 
         query = text(
             "INSERT INTO chunk "
-            "(id, content, document_id, kb_id, doc_name, status, chunk_s3_url) "
+            f"({', '.join(cols)}) "
             f"VALUES {placeholders}"
         )
         async with self._sf() as session:
