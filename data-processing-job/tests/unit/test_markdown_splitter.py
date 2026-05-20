@@ -135,7 +135,10 @@ class TestEmbedContent:
 
 class TestTableHandling:
 
-    def test_table_becomes_its_own_chunk(self):
+    def test_table_appears_in_a_chunk(self):
+        """Tables are part of their containing section, not chopped out
+        into a separate chunk. When the section fits in budget, ONE chunk
+        carries both the prose and the table."""
         text = (
             "# Sec\n\n"
             "prose paragraph.\n\n"
@@ -145,9 +148,55 @@ class TestTableHandling:
             "| c | d |\n"
         )
         rows = MarkdownSplitter().split(text)
-        table_chunks = [r for r in rows if "| h1 |" in r.content]
-        # Table block separated from prose into its own chunk.
-        assert len(table_chunks) >= 1
+        # Section is small — should fit in default budget as ONE chunk.
+        assert len(rows) == 1
+        assert "| h1 |" in rows[0].content
+        assert "prose paragraph" in rows[0].content
+
+
+# ---------------------------------------------------------------------------
+# Section-as-paragraph semantics (new model)
+# ---------------------------------------------------------------------------
+
+class TestSectionAsParagraph:
+
+    def test_small_section_yields_single_chunk_with_content_equal_parent(self):
+        """A section that fits in retrieve_max_tokens becomes ONE chunk.
+        ``content`` and ``parent_text`` are the same string in this case
+        (modulo content_prefix_mode differences)."""
+        rows = MarkdownSplitter(content_prefix_mode="full").split(
+            "# Sec\n\nshort body paragraph.\n"
+        )
+        assert len(rows) == 1
+        assert rows[0].content == rows[0].parent_text
+
+    def test_oversized_section_splits_into_children_sharing_parent(self):
+        """Force overflow with a tight cap. Children share parent_text."""
+        text = (
+            "# Sec\n\n"
+            "alpha paragraph with several words.\n\n"
+            "beta paragraph with several words.\n\n"
+            "gamma paragraph with several words.\n"
+        )
+        rows = MarkdownSplitter(
+            retrieve_max_tokens=20,
+            retrieve_target_tokens=15,
+        ).split(text)
+        assert len(rows) >= 2
+        assert len({r.parent_text for r in rows}) == 1
+
+    def test_preamble_before_first_heading_emits_a_chunk(self):
+        """Title pages / status blocks above the first ``#`` heading are
+        retrievable. heading_path is None for such chunks."""
+        text = (
+            "**Status:** owner is Alice.\n\n"
+            "# I. Intro\n\n"
+            "body.\n"
+        )
+        rows = MarkdownSplitter().split(text)
+        preamble = [r for r in rows if r.heading_path is None]
+        assert preamble, "preamble must produce its own chunk"
+        assert "Alice" in preamble[0].content
 
 
 # ---------------------------------------------------------------------------

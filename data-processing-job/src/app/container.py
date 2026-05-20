@@ -83,6 +83,7 @@ class WorkerContainer:
             tokenizer_model=settings.TIKTOKEN_MODEL_NAME,
             retrieve_max_tokens=settings.RETRIEVE_MAX_TOKENS,
             retrieve_target_tokens=settings.RETRIEVE_TARGET_TOKENS,
+            content_prefix_mode=settings.CONTENT_PREFIX_MODE,
         )
 
         self._embedding_service = EmbeddingService()

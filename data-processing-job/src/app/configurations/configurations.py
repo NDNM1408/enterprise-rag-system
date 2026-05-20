@@ -45,10 +45,18 @@ class Settings(BaseSettings):
 
     # Chunking — markdown-aware parent-child splitter
     TIKTOKEN_MODEL_NAME: str = Field(default="gpt-4o-mini", description="tiktoken model name for token counting")
-    # gemini-embedding-001 input cap is 2048 tokens; target keeps margin for
-    # tokenizer drift between tiktoken (gpt-4o) and Gemini.
-    RETRIEVE_MAX_TOKENS: int = Field(default=2048, ge=64, description="Hard upper bound for retrieve chunks (matches gemini-embedding-001 limit)")
-    RETRIEVE_TARGET_TOKENS: int = Field(default=1800, ge=64, description="Greedy pack target for retrieve chunks")
+    # Default tuned to a "hierarchical-style" child-chunk regime
+    # (target=400 / max=512). Benchmark against the DAB1 dataset shows
+    # smaller-child + deepest-only heading prefix recovers ~16pp of
+    # retrieval coverage vs the old 1800/2048 leaf-section sized chunks.
+    # ``parent_text`` still carries the full leaf section (with full
+    # heading trail), so LLM context on retrieve hit is unchanged.
+    RETRIEVE_MAX_TOKENS: int = Field(default=512, ge=64, description="Hard upper bound for retrieve (embed) chunks")
+    RETRIEVE_TARGET_TOKENS: int = Field(default=400, ge=64, description="Greedy pack target for retrieve (embed) chunks")
+    CONTENT_PREFIX_MODE: str = Field(
+        default="deepest",
+        description="Heading-path mode embedded into chunk content: full|deepest|none",
+    )
 
     # Embedding API
     EMBEDDING_API_BASE: str = Field(
