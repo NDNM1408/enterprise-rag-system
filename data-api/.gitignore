@@ -175,6 +175,8 @@ cython_debug/
 
 *.ipynb
 *.txt
+!requirements.txt
+!requirements-*.txt
 *.docx
 *.pdf
 *.xlsx

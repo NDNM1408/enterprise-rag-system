@@ -29,6 +29,17 @@ class DocumentRepository:
             row = result.one_or_none()
             return row[0] if row else None
 
+    async def get_ingesting_status(self, document_id: str) -> Optional[str]:
+        """Return the document's ingesting_status (phase-specific), or None
+        if not found. Used for idempotency on the embed pipeline only."""
+        async with self._sf() as session:
+            result = await session.execute(
+                text("SELECT ingesting_status FROM document WHERE id = :id"),
+                {"id": document_id},
+            )
+            row = result.one_or_none()
+            return row[0] if row else None
+
     async def set_status(self, document_id: str, status: str) -> None:
         """Update the document status.  Commits immediately."""
         async with self._sf() as session:
