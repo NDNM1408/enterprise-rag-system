@@ -129,16 +129,22 @@ class DocumentPreprocessService:
             UnsupportedFileTypeError: file extension not handled by the parser.
         """
         # ------------------------------------------------------------------
-        # Idempotency / existence check
+        # Idempotency / existence check.
+        # The legacy ``status`` column is now a rollup the orchestrator
+        # (data-api) writes to as soon as the parse phase starts, so it
+        # can already be 'Processing' before this task runs. The
+        # phase-specific ``ingesting_status`` is what tells us whether the
+        # embed pipeline itself has begun or finished.
         # ------------------------------------------------------------------
         status = await self.doc_repo.get_status(document_id)
         if status is None:
             raise DocumentNotFoundError(
                 f"Document {document_id} not found in database"
             )
-        if status in ("Processing", "Succeed"):
+        ingesting = await self.doc_repo.get_ingesting_status(document_id)
+        if ingesting == "Succeed":
             raise AlreadyProcessedError(
-                f"Document {document_id} is already {status}, skipping"
+                f"Document {document_id} ingestion already Succeeded, skipping"
             )
 
         # ------------------------------------------------------------------

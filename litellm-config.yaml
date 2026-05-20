@@ -1,46 +1,15 @@
 model_list:
-  # Default — gemini-embedding-001 with task_type=RETRIEVAL_DOCUMENT.
-  # 3072 dim. This is what chunk.embedding column is sized for and is the
-  # model used by the ingest pipeline when encoding chunk content.
+  # Embedding model using Google Gemini
   - model_name: rag-embedding-model
     litellm_params:
       model: gemini/gemini-embedding-001
-      api_key: your-gemini-api-key-here
-      task_type: RETRIEVAL_DOCUMENT
-
-  # Same model + weights, but encoded for the QUERY side. Using
-  # RETRIEVAL_QUERY here vs RETRIEVAL_DOCUMENT on the index side is
-  # Google's recommended asymmetric setup and typically lifts recall on
-  # retrieval. Output is still 3072 dim — query embeddings can be compared
-  # against document embeddings directly.
-  - model_name: rag-embedding-query
-    litellm_params:
-      model: gemini/gemini-embedding-001
-      api_key: your-gemini-api-key-here
-      task_type: RETRIEVAL_QUERY
-
-  # Symmetric similarity (use both sides) — handy for dedupe / clustering
-  # passes where you don't have a clear "doc vs query" split.
-  - model_name: rag-embedding-similarity
-    litellm_params:
-      model: gemini/gemini-embedding-001
-      api_key: your-gemini-api-key-here
-      task_type: SEMANTIC_SIMILARITY
-
-  # Legacy 768-dim Gemini embedding. Kept for quick benchmarking against
-  # the new 3072 model. Output is 768 dim and is NOT compatible with the
-  # current chunk.embedding vector(3072) column — call via /v1/embeddings
-  # for experiments only.
-  - model_name: legacy-embedding-model
-    litellm_params:
-      model: gemini/text-embedding-004
-      api_key: your-gemini-api-key-here
+      api_key: os.environ/GEMINI_API_KEY
 
   # Chat model for LightRAG entity extraction
   - model_name: graphrag-llm
     litellm_params:
       model: gemini/gemini-2.5-pro
-      api_key: your-gemini-api-key-here
+      api_key: os.environ/GEMINI_API_KEY
 
 litellm_settings:
   drop_params: true
