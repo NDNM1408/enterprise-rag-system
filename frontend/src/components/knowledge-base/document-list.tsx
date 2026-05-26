@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -12,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useDocuments, useDeleteDocument } from "@/lib/hooks";
+import { DocumentPreviewDialog } from "./document-preview-dialog";
 import type {
   Document,
   IngestingStatus,
@@ -26,6 +28,7 @@ import {
   XCircle,
   FileSearch,
   SkipForward,
+  Eye,
 } from "lucide-react";
 
 interface DocumentListProps {
@@ -155,6 +158,7 @@ export function DocumentList({ kbId }: DocumentListProps) {
   //   refetchInterval: (q) => q.state.data?.some(isDocumentActive) ? 2500 : false
   const { data: documents, isLoading } = useDocuments(kbId);
   const deleteDocument = useDeleteDocument();
+  const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
 
   const handleDelete = (docId: string, docName: string) => {
     if (confirm(`Are you sure you want to delete "${docName}"?`)) {
@@ -192,38 +196,64 @@ export function DocumentList({ kbId }: DocumentListProps) {
             <TableHead>Name</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Created</TableHead>
-            <TableHead className="w-[50px]"></TableHead>
+            <TableHead className="w-[100px]"></TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {documents.map((doc) => (
-            <TableRow key={doc.id}>
-              <TableCell>
-                <div className="flex items-center gap-2">
-                  <FileText className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium">{doc.name}</span>
-                </div>
-              </TableCell>
-              <TableCell>
-                <DocumentStatusCell doc={doc} />
-              </TableCell>
-              <TableCell className="text-muted-foreground">
-                {new Date(doc.create_time).toLocaleDateString()}
-              </TableCell>
-              <TableCell>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => handleDelete(doc.id, doc.name)}
-                  disabled={deleteDocument.isPending}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </TableCell>
-            </TableRow>
-          ))}
+          {documents.map((doc) => {
+            const canPreview = doc.status === "Succeed";
+            return (
+              <TableRow key={doc.id}>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-medium">{doc.name}</span>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <DocumentStatusCell doc={doc} />
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {new Date(doc.create_time).toLocaleDateString()}
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setPreviewDoc(doc)}
+                      disabled={!canPreview}
+                      title={
+                        canPreview
+                          ? "Preview parsed content & chunks"
+                          : "Available once processing finishes"
+                      }
+                    >
+                      <Eye className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleDelete(doc.id, doc.name)}
+                      disabled={deleteDocument.isPending}
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
+      <DocumentPreviewDialog
+        kbId={kbId}
+        docId={previewDoc?.id ?? null}
+        docName={previewDoc?.name}
+        onOpenChange={(open) => {
+          if (!open) setPreviewDoc(null);
+        }}
+      />
     </div>
   );
 }

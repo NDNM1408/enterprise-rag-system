@@ -3,7 +3,7 @@
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { createAgentSchema, type CreateAgentInput } from "@/lib/schemas";
-import { useCreateAgent, useKnowledgeBases } from "@/lib/hooks";
+import { useCreateAgent, useKnowledgeBases, useLiteLLMModels } from "@/lib/hooks";
 import {
   Dialog,
   DialogContent,
@@ -38,17 +38,9 @@ interface CreateAgentDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
-const LLM_MODELS = [
-  { value: "gpt-4o", label: "GPT-4o" },
-  { value: "gpt-4o-mini", label: "GPT-4o Mini" },
-  { value: "gpt-4-turbo", label: "GPT-4 Turbo" },
-  { value: "gpt-3.5-turbo", label: "GPT-3.5 Turbo" },
-  { value: "claude-3-5-sonnet-20241022", label: "Claude 3.5 Sonnet" },
-  { value: "claude-3-opus-20240229", label: "Claude 3 Opus" },
-];
-
 export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps) {
   const createAgent = useCreateAgent();
+  const { data: liteLLMModels, isLoading: modelsLoading } = useLiteLLMModels();
 
   const form = useForm<CreateAgentInput>({
     resolver: zodResolver(createAgentSchema),
@@ -56,7 +48,7 @@ export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps
       name: "",
       description: "",
       llm_model: "",
-      temperature: 0.7,
+      llm_temperature: 0.7,
       system_prompt: "",
     },
   });
@@ -121,13 +113,17 @@ export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps
                   <Select onValueChange={field.onChange} defaultValue={field.value}>
                     <FormControl>
                       <SelectTrigger>
-                        <SelectValue placeholder="Select a model" />
+                        <SelectValue
+                          placeholder={
+                            modelsLoading ? "Loading models…" : "Select a model"
+                          }
+                        />
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {LLM_MODELS.map((model) => (
-                        <SelectItem key={model.value} value={model.value}>
-                          {model.label}
+                      {(liteLLMModels ?? []).map((id) => (
+                        <SelectItem key={id} value={id}>
+                          {id}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -138,7 +134,7 @@ export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps
             />
             <FormField
               control={form.control}
-              name="temperature"
+              name="llm_temperature"
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Temperature: {field.value}</FormLabel>
@@ -149,7 +145,7 @@ export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps
                       max="2"
                       step="0.1"
                       value={field.value}
-                      onChange={field.onChange}
+                      onChange={(e) => field.onChange(Number(e.target.value))}
                       className="w-full"
                     />
                   </FormControl>

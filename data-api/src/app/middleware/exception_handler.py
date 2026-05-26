@@ -13,7 +13,8 @@ from app.exceptions import (
     ConflictError,
     ValidationError,
     DatabaseError,
-    ExternalServiceError
+    ExternalServiceError,
+    GuardrailError,
 )
 from app.application.dtos.responses.error_response import create_error_response
 
@@ -152,6 +153,26 @@ def register_exception_handlers(app: FastAPI) -> None:
 
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=error_response.model_dump()
+        )
+
+    @app.exception_handler(GuardrailError)
+    async def handle_guardrail_error(request: Request, exc: GuardrailError) -> JSONResponse:
+        """Handle guardrail validation errors."""
+        request_id = get_request_id(request)
+        logger.warning(f"[{request_id}] Guardrail error: {exc.message}")
+
+        error_response = create_error_response(
+            status=status.HTTP_400_BAD_REQUEST,
+            title="Guardrail Validation Failed",
+            detail=exc.message,
+            request_id=request_id,
+            instance=str(request.url),
+            errors=exc.details if exc.details else None
+        )
+
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
             content=error_response.model_dump()
         )
 

@@ -9,7 +9,7 @@ export const createKbSchema = z.object({
   description: z.string().max(500).optional(),
   parser_config: z
     .object({
-      rag_mode: z.enum(["classic", "graphrag"]).default("classic"),
+      rag_mode: z.enum(["classic", "llm-wiki"]).optional(),
     })
     .optional(),
 });
@@ -24,7 +24,7 @@ export const createAgentSchema = z.object({
   name: z.string().min(1, "Name is required").max(120),
   description: z.string().max(500).optional(),
   llm_model: z.string().min(1, "Model is required"),
-  llm_temperature: z.coerce.number().min(0).max(2).optional(),
+  llm_temperature: z.number().min(0).max(2).optional(),
   system_prompt: z.string().max(8000).optional(),
 });
 

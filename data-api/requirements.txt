@@ -22,3 +22,12 @@ python-multipart==0.0.20
 alembic==1.14.0
 
 json-repair==0.30.3
+
+# Chatbot / LangGraph dependencies (merged from chatbot-service)
+openai>=1.58.1
+langgraph>=0.3.0
+langchain-openai>=0.3.0
+langchain-core>=0.3.15
+
+# Elasticsearch (llm-wiki rag_mode)
+elasticsearch[async]==8.16.0

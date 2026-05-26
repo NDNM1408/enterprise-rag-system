@@ -101,6 +101,11 @@ class Settings:
     # comes down to a few seconds. Set false to OCR table regions as plain
     # text without preserving cell structure.
     parse_table_struct: bool = _env_bool("PARSE_TABLE_STRUCT", True)
+    # When False, skip the SLANet+ "wireless" table-structure model and
+    # always use UNet-wired. Saves the ~600 MB wireless ONNX in RAM and
+    # halves table-struct latency on table-heavy pages at the cost of
+    # worse output on borderless tables.
+    parse_table_wireless: bool = _env_bool("PARSE_TABLE_WIRELESS", False)
 
     # ── CPU-batched pipeline (TEXT-mode) ─────────────────────────────
     # Master switch: turn off to bypass page-classification + batched

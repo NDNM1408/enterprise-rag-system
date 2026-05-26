@@ -62,33 +62,17 @@ class Settings(BaseSettings):
     EMBEDDING_API_KEY: str = Field(default="fake")
     EMBEDDING_BATCH_SIZE: int = Field(default=4, ge=1, le=64)
 
-    # Neo4j (for graph storage)
-    NEO4J_URI: str = Field(default="bolt://localhost:7687", description="Neo4j Bolt URI")
-    NEO4J_USERNAME: str = Field(default="neo4j", description="Neo4j username")
-    NEO4J_PASSWORD: str = Field(default="neo4j", description="Neo4j password")
-    NEO4J_DATABASE: str = Field(default="neo4j", description="Neo4j database name")
-
-    # GraphRAG — LLM used for entity extraction
-    GRAPHRAG_LLM_API_BASE: str = Field(
-        default="http://localhost:4000/v1",
-        description="OpenAI-compatible base URL for GraphRAG entity-extraction LLM"
+    # Elasticsearch (llm-wiki rag_mode)
+    ELASTICSEARCH_URL: str = Field(
+        default="http://elasticsearch:9200",
+        description="Elasticsearch endpoint for llm-wiki indexing/retrieval",
     )
-    GRAPHRAG_LLM_MODEL: str = Field(
-        default="gemini/gemini-2.0-flash",
-        description="LLM model name for GraphRAG entity extraction"
+    ELASTICSEARCH_USERNAME: str = Field(default="", description="ES username (empty = no auth)")
+    ELASTICSEARCH_PASSWORD: str = Field(default="", description="ES password")
+    ELASTICSEARCH_INDEX_PREFIX: str = Field(
+        default="kb",
+        description="Prefix for per-KB Elasticsearch indices (final name: <prefix>-<kb_id>)",
     )
-    GRAPHRAG_LLM_API_KEY: str = Field(default="fake", description="API key for GraphRAG LLM")
-    GRAPHRAG_WORKING_DIR: str = Field(
-        default="/tmp/graphrag",
-        description="Base directory for GraphRAG file-based caches"
-    )
-
-    # Postgres connection params for GraphRAG PGVector stores
-    POSTGRES_HOST: str = Field(default="localhost", description="Postgres host for GraphRAG")
-    POSTGRES_PORT: int = Field(default=5432, description="Postgres port for GraphRAG")
-    POSTGRES_USER: str = Field(default="datahub", description="Postgres user for GraphRAG")
-    POSTGRES_PASSWORD: str = Field(default="datahub", description="Postgres password for GraphRAG")
-    POSTGRES_DATABASE: str = Field(default="datahub", description="Postgres database for GraphRAG")
 
     # Server (health-check FastAPI app)
     PORT: int = Field(default=8001, ge=1, le=65535)

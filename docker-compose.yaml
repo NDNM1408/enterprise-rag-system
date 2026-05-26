@@ -88,6 +88,17 @@ services:
       # Document-parsing orchestrator wiring
       DOCUMENT_PARSING_URL: http://document-parsing-api:8002
       DOCUMENT_PARSING_CALLBACK_BASE: http://data-api:8000
+      # Embedding gateway (mirror data-processing-job-worker so query
+      # embedding matches chunk embedding — different models -> 0 results).
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-http://litellm:4000/v1}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-rag-embedding-model}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-fake}
+      # Chatbot LLM (merged from chatbot-service)
+      LITELLM_API_BASE: ${LITELLM_API_BASE:-http://litellm:4000/v1}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-fake}
+      DATA_API_URL: http://data-api:8000
+      # Elasticsearch (llm-wiki rag_mode)
+      ELASTICSEARCH_URL: http://elasticsearch:9200
     volumes:
       - ./data-api/src:/app/src:ro
     depends_on:
@@ -96,6 +107,8 @@ services:
       rabbitmq:
         condition: service_healthy
       minio:
+        condition: service_healthy
+      elasticsearch:
         condition: service_healthy
       document-parsing-api:
         condition: service_started
@@ -125,6 +138,7 @@ services:
       MINERU_DPI: ${MINERU_DPI:-200}
       PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
       PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      PARSE_TABLE_WIRELESS: ${PARSE_TABLE_WIRELESS:-false}
       DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cpu}
       DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cpu}
       DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cpu}
@@ -136,7 +150,6 @@ services:
     volumes:
       - ./document-parsing/src:/app/src:ro
       - ./document-parsing/models/models_onnx:/opt/mineru/models_onnx:ro
-      - ./document-parsing/models/vietocr:/root/.cache/vietocr:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -167,6 +180,7 @@ services:
       MINERU_DPI: ${MINERU_DPI:-200}
       PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
       PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      PARSE_TABLE_WIRELESS: ${PARSE_TABLE_WIRELESS:-false}
       DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cpu}
       DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cpu}
       DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cpu}
@@ -178,7 +192,6 @@ services:
     volumes:
       - ./document-parsing/src:/app/src:ro
       - ./document-parsing/models/models_onnx:/opt/mineru/models_onnx:ro
-      - ./document-parsing/models/vietocr:/root/.cache/vietocr:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -244,6 +257,7 @@ services:
       EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-rag-embedding-model}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-fake}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-4}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
       MODE: dev
     volumes:
       - ./data-processing-job/src:/app/src:ro
@@ -255,27 +269,40 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     restart: unless-stopped
 
-  neo4j:
-    image: neo4j:5.26-community
-    container_name: neo4j
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.16.1
+    container_name: elasticsearch
     ports:
-      - "7474:7474"    # HTTP browser
-      - "7687:7687"    # Bolt
+      # Host port 9201 to avoid clashing with other ES instances on the dev box;
+      # in-cluster traffic still uses 9200.
+      - "9201:9200"
     environment:
-      NEO4J_AUTH: neo4j/datahub1!
-      NEO4J_server_memory_heap_initial__size: 512m
-      NEO4J_server_memory_heap_max__size: 2g
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      # Generous heap for embedding-heavy indices. Adjust for prod.
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+      # Force ICU analyser bundle to be available for Vietnamese tokenisation.
+      ingest.geoip.downloader.enabled: "false"
     volumes:
-      - neo4j-data:/data
+      - elasticsearch-data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p datahub1! 'RETURN 1' 2>/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
 
 volumes:
   minio-data:
   pgvector-data:
-  neo4j-data:
+  elasticsearch-data:

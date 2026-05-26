@@ -167,6 +167,10 @@ def _build_parser():
     # ONNX still benefits from ``device_table_rec`` once we override below.
     parser.ocr_engine = OCREngine(parser.ocr_det, parser.ocr_rec)
 
+    if not settings.parse_table_wireless and parser.table_wireless is not None:
+        log.info("[devices] dropping table_wireless (PARSE_TABLE_WIRELESS=false)")
+        parser.table_wireless = None
+
     log.info(
         "[devices] layout=%s ocr_det=%s ocr_rec=%s orient=%s table_cls=%s",
         describe_provider(layout_providers),
@@ -685,7 +689,7 @@ def extract_table_routed(parser, crop_bgr, precomputed_ocr=None) -> tuple[str, s
 
     # Dispatch via the lightweight table_cls (small CNN, runs in <50 ms).
     kind = "wired"  # safe default if classifier is missing
-    if parser.table_cls is not None:
+    if parser.table_cls is not None and settings.parse_table_wireless:
         try:
             kind = parser.table_cls.classify(crop_bgr)
         except Exception:
@@ -752,6 +756,11 @@ def extract_table_both_parallel(
     if parser.table_wired is None and parser.table_wireless is None:
         return ("fallback", "")
 
+    # Fast path: wireless disabled (PARSE_TABLE_WIRELESS=false). Skip the
+    # thread pool and the _select_table_html heuristic — just run wired
+    # synchronously.
+    wireless_enabled = settings.parse_table_wireless and parser.table_wireless is not None
+
     # Normalise precomputed OCR to ``[[quad, escaped_text, score], ...]``.
     if precomputed_ocr is not None:
         ocr_result = [
@@ -792,6 +801,10 @@ def extract_table_both_parallel(
         except Exception:
             log.exception("table_wireless failed")
             return ""
+
+    if not wireless_enabled:
+        wired_html = _run_wired()
+        return ("wired" if wired_html else "fallback", wired_html)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_wired = pool.submit(_run_wired)

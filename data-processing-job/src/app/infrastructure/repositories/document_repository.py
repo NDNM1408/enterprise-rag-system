@@ -128,6 +128,9 @@ class DocumentRepository:
         """
         async with self._sf() as session:
             async with session.begin():
+                # ``status`` column is the legacy "DocumentStatus" enum
+                # (created in migration 000). asyncpg requires an explicit
+                # cast — bare text literals raise DatatypeMismatchError.
                 await session.execute(
                     text(
                         """
@@ -135,8 +138,9 @@ class DocumentRepository:
                         SET ingesting_status   = :ing_status,
                             ingesting_progress = 100,
                             status = CASE
-                                WHEN :success AND parsing_status <> 'Failed' THEN 'Succeed'
-                                ELSE 'Failed'
+                                WHEN :success AND parsing_status <> 'Failed'
+                                    THEN 'Succeed'::"DocumentStatus"
+                                ELSE 'Failed'::"DocumentStatus"
                             END
                         WHERE id = :id
                         """

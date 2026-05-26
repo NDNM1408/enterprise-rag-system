@@ -62,7 +62,7 @@ def _build_no_ocr_parser() -> SimpleNamespace:
             )
 
         table_wireless = None
-        if (models / "table_slanet.onnx").exists():
+        if settings.parse_table_wireless and (models / "table_slanet.onnx").exists():
             table_wireless = PaddleTableModel(
                 ocr_engine=None, model_path=str(models / "table_slanet.onnx"),
             )

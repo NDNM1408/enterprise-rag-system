@@ -21,38 +21,42 @@ celery_client.conf.update(
     task_routes={
         'preprocess_document': {'queue': 'preprocess_queue', 'routing_key': 'preprocess.document'},
         'upsert_chunk': {'queue': 'upsert_queue', 'routing_key': 'upsert.chunk'},
-        'graph_preprocess_document': {'queue': 'graph_ingest_queue', 'routing_key': 'graph.preprocess'},
+        'llm_wiki_preprocess_document': {'queue': 'llm_wiki_queue', 'routing_key': 'llm_wiki.preprocess'},
     },
     # no_declare=True prevents PRECONDITION_FAILED when the worker has already
     # created these queues with x-dead-letter-exchange and other special args.
     task_queues=[
         Queue('preprocess_queue', no_declare=True),
         Queue('upsert_queue', no_declare=True),
-        Queue('graph_ingest_queue', no_declare=True),
+        Queue('llm_wiki_queue', no_declare=True),
     ],
     task_default_queue='preprocess_queue',
     task_create_missing_queues=False,
 )
 
 
-def send_graph_preprocess_task(
+def send_llm_wiki_preprocess_task(
     document_id: str,
     knowledge_base_id: str,
     name: str,
     bucket: str,
     correlation_id: Optional[str] = None,
+    parsed_markdown_s3_url: Optional[str] = None,
 ):
+    """Dispatch the llm-wiki ingest task — chunks markdown by Vietnamese
+    legal articles / headings and indexes into Elasticsearch."""
     return celery_client.send_task(
-        'graph_preprocess_document',
+        'llm_wiki_preprocess_document',
         kwargs={
             'document_id': document_id,
             'knowledge_base_id': knowledge_base_id,
             'name': name,
             'bucket': bucket,
             'correlation_id': correlation_id,
+            'parsed_markdown_s3_url': parsed_markdown_s3_url,
         },
-        queue='graph_ingest_queue',
-        routing_key='graph.preprocess',
+        queue='llm_wiki_queue',
+        routing_key='llm_wiki.preprocess',
     )
 
 

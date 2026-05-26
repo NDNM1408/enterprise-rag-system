@@ -1,35 +1,34 @@
-"""Markdown-aware parent-child splitter (denormalized layout).
+"""Markdown-aware parent-child splitter (denormalized, table-segmented).
 
-One markdown document becomes a flat list of retrieve chunks. Each row
-carries both pieces the rest of the pipeline needs:
+Section → parent groups, partitioned at each table boundary. Each parent owns
+at most one table plus the surrounding description text (from the previous
+table boundary, or section start, up to the table). A parent without a table
+covers text-only tail of the section.
 
-  • ``content``      — the embed text: heading path prefix + a paragraph /
-                       table group capped at ``retrieve_max_tokens`` so it
-                       fits the embedding model's input limit.
-  • ``parent_text``  — the full enclosing leaf section (prefix + every
-                       paragraph/table of the section). Injected into the
-                       LLM prompt when this chunk is retrieved, giving the
-                       model surrounding context without a second DB lookup.
+Within a parent:
+  • Description text → paragraph-packed child chunks (split by blank line,
+    greedy-packed up to ``retrieve_target_tokens``).
+  • Table → either a single chunk that bundles heading + description + table
+    (when the whole table fits), or per-row child chunks (when the table is
+    oversize). Per-row chunks include the heading prefix and the table header
+    so embeddings still have column context.
 
-Algorithm:
-  1. Build a heading tree by parsing ``#`` lines.
-  2. Walk every leaf section. The section's full body, with the heading
-     path prepended, is its ``parent_text``.
-  3. Inside a leaf, split the body into paragraph / table blocks separated
-     by blank lines:
-       • markdown tables → their own chunk (header + separator + rows);
-         row-split when oversized.
-       • paragraphs are greedily packed up to ``retrieve_target_tokens``.
-       • any single paragraph exceeding ``retrieve_max_tokens`` is hard-
-         split with a tiktoken sliding window.
-  4. Prefix each retrieve piece with the heading path so the embedding
-     sees the structural cue.
-  5. Document preamble (text before the first heading) is treated as a
-     synthetic leaf section when present.
+Both kinds of children share the same ``parent_text`` (heading + description
++ full table) so retrieval can re-inject full context to the LLM.
 
-The old "separate parent (generate) rows linked by parent_id" model from
-the earlier splitter is replaced by inlining ``parent_text``. ``parent_id``
-is no longer populated (legacy column stays NULL).
+Algorithm at a glance::
+
+    section body
+        │
+        ▼
+    split into paragraph / table blocks (blank-line separated)
+        │
+        ▼
+    walk blocks; emit a parent each time a table is consumed,
+      and one trailing text-only parent for residual prose
+        │
+        ▼
+    per parent → fan out child chunks (text-pack + table-or-rows)
 """
 from __future__ import annotations
 
@@ -51,31 +50,34 @@ TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$")
 
 @dataclass
 class ChunkRow:
-    """One row emitted by the splitter.
-
-    Mirrors the columns the preprocess service inserts into ``chunk``.
-    ``content`` is what gets embedded; ``parent_text`` is what the LLM
-    sees after a retrieval hit.
-    """
+    """One row emitted by the splitter (mirrors the ``chunk`` table columns)."""
     id: str
-    content: str                       # embed + match text
-    parent_text: str                   # full leaf-section body for LLM
-    chunk_order_index: int             # 0-based position in the document
-    tokens: int                        # token count of ``content``
+    content: str
+    parent_text: str
+    chunk_order_index: int
+    tokens: int
     heading_path: Optional[str] = None
 
 
 @dataclass
 class _Section:
-    level: int                         # 1..6 ; 0 = synthetic root for preamble
+    level: int
     title: str
     path: List[str] = field(default_factory=list)
     body_lines: List[str] = field(default_factory=list)
     children: List["_Section"] = field(default_factory=list)
 
 
+@dataclass
+class _ParentGroup:
+    """One parent slice of a section: a (possibly empty) description text
+    block and at most one table. A trailing pure-text group has table=None."""
+    text: str
+    table: Optional[str]
+
+
 class MarkdownSplitter:
-    """Markdown-aware splitter producing denormalized parent-child chunks."""
+    """Table-segmented parent-child splitter."""
 
     def __init__(
         self,
@@ -83,18 +85,6 @@ class MarkdownSplitter:
         retrieve_max_tokens: int = 2048,
         retrieve_target_tokens: int = 1800,
     ):
-        """
-        Args:
-            tokenizer_model:        tiktoken model used to count tokens.
-            retrieve_max_tokens:    hard upper bound for embed pieces.
-                                    Default 2048 matches
-                                    ``gemini-embedding-001`` input limit.
-            retrieve_target_tokens: greedy pack target — stop adding more
-                                    paragraphs once a chunk crosses this
-                                    threshold. Margin under max_tokens
-                                    absorbs tokenizer drift between
-                                    tiktoken (gpt-4o) and Gemini.
-        """
         if retrieve_target_tokens > retrieve_max_tokens:
             raise ValueError("retrieve_target_tokens must be <= retrieve_max_tokens")
         try:
@@ -129,30 +119,24 @@ class MarkdownSplitter:
                 continue
 
             heading_path = " > ".join(section.path) if section.path else None
-            prefix = ""
-            if section.path:
-                # Render with hash levels so the LLM (and embedding) sees
-                # the structural cue, not just a flat title.
-                prefix = "\n".join(
-                    f"{'#' * (i + 1)} {h}"
-                    for i, h in enumerate(section.path)
-                ) + "\n\n"
+            prefix = self._render_heading_prefix(section.path)
 
-            parent_text = (prefix + body).strip()
-
-            for piece in self._iter_retrieve_pieces(body):
-                content = (prefix + piece).strip()
-                rows.append(
-                    ChunkRow(
-                        id=str(uuid.uuid4()),
-                        content=content,
-                        parent_text=parent_text,
-                        chunk_order_index=order,
-                        tokens=self._count(content),
-                        heading_path=heading_path,
+            for group in self._partition_by_tables(body):
+                parent_text = self._compose_parent_text(prefix, group)
+                for content in self._iter_children(prefix, group):
+                    if not content.strip():
+                        continue
+                    rows.append(
+                        ChunkRow(
+                            id=str(uuid.uuid4()),
+                            content=content,
+                            parent_text=parent_text,
+                            chunk_order_index=order,
+                            tokens=self._count(content),
+                            heading_path=heading_path,
+                        )
                     )
-                )
-                order += 1
+                    order += 1
 
         return rows
 
@@ -161,12 +145,6 @@ class MarkdownSplitter:
     # ------------------------------------------------------------------
 
     def _build_tree(self, text: str) -> _Section:
-        """Parse markdown into a heading tree.
-
-        Lines preceding the first heading become the body of a synthetic
-        root section (level=0, title=""). Subsequent sections are nested
-        by ``#`` count.
-        """
         root = _Section(level=0, title="", path=[])
         stack: List[_Section] = [root]
 
@@ -192,13 +170,6 @@ class MarkdownSplitter:
         return root
 
     def _iter_leaf_sections(self, node: _Section):
-        """Yield leaf sections (no children).
-
-        The synthetic root is a leaf only when the document has zero
-        headings — otherwise document preamble is folded into the first
-        heading's siblings (which is fine because preamble is typically
-        a title page or empty).
-        """
         if not node.children:
             if node.level == 0 and not "".join(node.body_lines).strip():
                 return
@@ -207,28 +178,88 @@ class MarkdownSplitter:
         for child in node.children:
             yield from self._iter_leaf_sections(child)
 
+    @staticmethod
+    def _render_heading_prefix(path: List[str]) -> str:
+        if not path:
+            return ""
+        return "\n".join(f"{'#' * (i + 1)} {h}" for i, h in enumerate(path)) + "\n\n"
+
     # ------------------------------------------------------------------
-    # Retrieve-piece extraction
+    # Section → parent groups (split at table boundaries)
     # ------------------------------------------------------------------
 
-    def _iter_retrieve_pieces(self, body: str) -> List[str]:
-        """Return paragraph/table pieces each fitting under
-        ``retrieve_max_tokens``.
-
-        Walks the section body block-by-block (blank line separator).
-          • Markdown tables become their own piece (preserve structure);
-            row-split when oversized.
-          • Paragraphs hard-split when a single one exceeds the cap.
-          • Otherwise paragraphs are greedily packed up to
-            ``retrieve_target_tokens``.
-        """
+    def _partition_by_tables(self, body: str) -> List[_ParentGroup]:
+        """Walk blocks; every encountered table closes a parent group with the
+        accumulated preceding text as its description. Residual text after the
+        final table becomes a trailing text-only parent."""
         blocks = self._split_blocks(body)
+        groups: List[_ParentGroup] = []
+        pending: List[str] = []
 
+        for block in blocks:
+            if self._looks_like_table(block):
+                desc = "\n\n".join(pending).strip()
+                groups.append(_ParentGroup(text=desc, table=block))
+                pending = []
+            else:
+                pending.append(block)
+
+        if pending:
+            desc = "\n\n".join(pending).strip()
+            if desc:
+                groups.append(_ParentGroup(text=desc, table=None))
+
+        if not groups:
+            # Body was entirely whitespace once blocks were filtered; nothing
+            # to emit — caller already guards on empty body but keep the
+            # invariant explicit.
+            return []
+        return groups
+
+    def _compose_parent_text(self, prefix: str, group: _ParentGroup) -> str:
+        parts = []
+        if group.text:
+            parts.append(group.text)
+        if group.table:
+            parts.append(group.table)
+        body = "\n\n".join(parts).strip()
+        return (prefix + body).strip()
+
+    # ------------------------------------------------------------------
+    # Parent group → child chunks
+    # ------------------------------------------------------------------
+
+    def _iter_children(self, prefix: str, group: _ParentGroup) -> List[str]:
+        out: List[str] = []
+
+        if group.text:
+            for piece in self._pack_text_paragraphs(group.text):
+                out.append((prefix + piece).strip())
+
+        if group.table is not None:
+            table_md = group.table
+            table_tokens = self._count(table_md)
+            if table_tokens <= self.retrieve_max_tokens:
+                out.append(self._build_table_chunk(prefix, group.text, table_md))
+            else:
+                out.extend(self._split_table_by_rows(prefix, table_md))
+
+        return out
+
+    # ------------------------------------------------------------------
+    # Text packing
+    # ------------------------------------------------------------------
+
+    def _pack_text_paragraphs(self, text: str) -> List[str]:
+        """Greedy-pack paragraph blocks (blank-line separated) up to
+        ``retrieve_target_tokens``. Paragraphs that overshoot
+        ``retrieve_max_tokens`` on their own are token-window split."""
+        blocks = self._split_blocks(text)
         out: List[str] = []
         current: List[str] = []
         current_tokens = 0
 
-        def flush_current() -> None:
+        def flush() -> None:
             nonlocal current, current_tokens
             if current:
                 joined = "\n\n".join(current).strip()
@@ -239,31 +270,67 @@ class MarkdownSplitter:
 
         for block in blocks:
             block_tokens = self._count(block)
-
-            if self._looks_like_table(block):
-                flush_current()
-                if block_tokens <= self.retrieve_max_tokens:
-                    out.append(block)
-                else:
-                    out.extend(self._split_table_by_rows(block))
-                continue
-
             if block_tokens > self.retrieve_max_tokens:
-                flush_current()
+                flush()
                 out.extend(self._hard_split(block))
                 continue
-
-            if current_tokens + block_tokens > self.retrieve_target_tokens and current:
-                flush_current()
-
+            if current and current_tokens + block_tokens > self.retrieve_target_tokens:
+                flush()
             current.append(block)
             current_tokens += block_tokens
-
-        flush_current()
+        flush()
         return out
 
+    # ------------------------------------------------------------------
+    # Table chunking
+    # ------------------------------------------------------------------
+
+    def _build_table_chunk(self, prefix: str, description: str, table_md: str) -> str:
+        """Whole-table chunk: heading + description (table caption) + table."""
+        parts = []
+        if description:
+            parts.append(description)
+        parts.append(table_md)
+        content = (prefix + "\n\n".join(parts)).strip()
+        if self._count(content) <= self.retrieve_max_tokens:
+            return content
+        # Table + description + heading still oversize. Drop description first
+        # (it is preserved in parent_text), then heading. Table itself is the
+        # primary signal.
+        content = (prefix + table_md).strip()
+        if self._count(content) <= self.retrieve_max_tokens:
+            return content
+        return table_md.strip()
+
+    def _split_table_by_rows(self, prefix: str, table_md: str) -> List[str]:
+        """Per-row chunks for oversize tables. Each chunk = heading + header
+        + separator + one data row. Rows that exceed ``retrieve_max_tokens``
+        on their own are token-window split as a last resort."""
+        lines = table_md.splitlines()
+        if len(lines) < 3:
+            return [(prefix + table_md).strip()]
+        header = lines[0]
+        sep = lines[1]
+        data_rows = [ln for ln in lines[2:] if ln.strip()]
+        if not data_rows:
+            return [(prefix + table_md).strip()]
+
+        header_block = f"{header}\n{sep}"
+        out: List[str] = []
+        for row in data_rows:
+            chunk = f"{prefix}{header_block}\n{row}".strip()
+            if self._count(chunk) <= self.retrieve_max_tokens:
+                out.append(chunk)
+            else:
+                out.extend(self._hard_split(chunk))
+        return out
+
+    # ------------------------------------------------------------------
+    # Low-level helpers
+    # ------------------------------------------------------------------
+
     def _split_blocks(self, body: str) -> List[str]:
-        """Group lines into paragraph / table blocks, separated by blank lines."""
+        """Group lines into paragraph / table blocks separated by blank lines."""
         blocks: List[str] = []
         buf: List[str] = []
         for line in body.splitlines():
@@ -285,35 +352,8 @@ class MarkdownSplitter:
             return False
         return bool(TABLE_SEP_RE.match(lines[1]))
 
-    def _split_table_by_rows(self, block: str) -> List[str]:
-        """Split a too-big table by data rows, replicating the header +
-        separator at the top of each piece."""
-        lines = block.splitlines()
-        header = lines[0]
-        sep = lines[1]
-        rows = lines[2:]
-        if not rows:
-            return [block]
-
-        out: List[str] = []
-        current = [header, sep]
-        current_tokens = self._count("\n".join(current))
-        for row in rows:
-            row_tokens = self._count(row)
-            if current_tokens + row_tokens > self.retrieve_target_tokens and len(current) > 2:
-                out.append("\n".join(current))
-                current = [header, sep]
-                current_tokens = self._count("\n".join(current))
-            current.append(row)
-            current_tokens += row_tokens
-        if len(current) > 2:
-            out.append("\n".join(current))
-        return out
-
     def _hard_split(self, block: str) -> List[str]:
-        """Token-level sliding window for a paragraph that overshoots
-        ``retrieve_max_tokens`` on its own (rare — long uninterrupted
-        prose, usually OCR'd PDFs with no paragraph breaks)."""
+        """Token-window fallback for content that overshoots the max on its own."""
         tokens = self.encoding.encode(block)
         out: List[str] = []
         size = self.retrieve_target_tokens
@@ -321,10 +361,6 @@ class MarkdownSplitter:
             slice_ = tokens[start : start + size]
             out.append(self.encoding.decode(slice_).strip())
         return [s for s in out if s]
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _count(self, text: str) -> int:
         return len(self.encoding.encode(text))

@@ -107,6 +107,26 @@ async def create_documents(
     )
 
 
+@router.get(
+    "/{kb_id}/documents/{doc_id}/preview",
+    summary="Preview a processed document",
+    description=(
+        "Return the parsed markdown (when available) plus every chunk "
+        "produced for this document. Used by the UI to inspect what the "
+        "ingest pipeline actually stored for the knowledge base."
+    ),
+)
+async def preview_document(
+    request: Request,
+    kb_id: str = Path(..., description="Knowledge Base ID"),
+    doc_id: str = Path(..., description="Document ID"),
+    document_service: DocumentsService = Depends(get_document_service),
+):
+    preview = await document_service.get_preview(kb_id=kb_id, doc_id=doc_id)
+    request_id = getattr(request.state, "request_id", "unknown")
+    return create_success_response(data=preview, request_id=request_id)
+
+
 @router.post(
     "/internal/parse-callback",
     summary="Document-parsing service callback",

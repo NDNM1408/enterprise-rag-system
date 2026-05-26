@@ -24,14 +24,14 @@ task_queues = (
               'x-dead-letter-exchange': 'dlx',
               'x-dead-letter-routing-key': 'dlq.upsert',
           }),
-    Queue('graph_ingest_queue',
+    Queue('llm_wiki_queue',
           exchange=Exchange('data_exchange', type='topic', durable=True),
-          routing_key='graph.*',
+          routing_key='llm_wiki.*',
           queue_arguments={
               'x-dead-letter-exchange': 'dlx',
-              'x-dead-letter-routing-key': 'dlq.graph',
-              # Entity extraction is LLM-heavy; allow up to 2 hours
-              'x-message-ttl': 7200000,
+              'x-dead-letter-routing-key': 'dlq.llm_wiki',
+              # Legal corpora ingestion is embedding-heavy; allow 1h soft TTL.
+              'x-message-ttl': 3600000,
           }),
     Queue('dlq', exchange=DLX_EXCHANGE, routing_key='dlq.#', durable=True),
 )
@@ -41,9 +41,7 @@ celery_app.conf.update(
 
     # Task routing
     task_routes={
-        'graph_preprocess_document': {'queue': 'graph_ingest_queue', 'routing_key': 'graph.preprocess'},
-        'graph_ingest_chunk':        {'queue': 'graph_ingest_queue', 'routing_key': 'graph.ingest'},
-        'finalize_graph_document':   {'queue': 'graph_ingest_queue', 'routing_key': 'graph.finalize'},
+        'llm_wiki_preprocess_document': {'queue': 'llm_wiki_queue', 'routing_key': 'llm_wiki.preprocess'},
     },
 
     # Reliability settings for long-running tasks

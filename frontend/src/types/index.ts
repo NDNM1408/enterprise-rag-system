@@ -5,7 +5,7 @@ export interface KnowledgeBase {
   description?: string;
   embed_id?: string;
   parser_config?: {
-    rag_mode?: "classic" | "graphrag";
+    rag_mode?: "classic" | "llm-wiki";
   };
   create_time: string;
   update_time: string;
@@ -16,7 +16,7 @@ export interface CreateKbRequest {
   name: string;
   description?: string;
   parser_config?: {
-    rag_mode: "classic" | "graphrag";
+    rag_mode?: "classic" | "llm-wiki";
   };
 }
 
@@ -24,7 +24,7 @@ export interface UpdateKbRequest {
   name?: string;
   description?: string;
   parser_config?: {
-    rag_mode: "classic" | "graphrag";
+    rag_mode?: "classic" | "llm-wiki";
   };
 }
 
@@ -66,6 +66,7 @@ export interface Agent {
   is_active: boolean;
   system_prompt?: string;
   kb_ids?: string[];
+  knowledge_bases?: { id: string; name: string }[];
   create_time: string;
   update_time: string;
 }

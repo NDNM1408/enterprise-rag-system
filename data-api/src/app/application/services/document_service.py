@@ -18,7 +18,7 @@ from app.infrastructure.connectors.postgres.schema import (
     ParsingStatus,
 )
 from app.infrastructure.clients.s3_client_service import S3ClientService
-from app.celery_client import send_preprocess_task, send_graph_preprocess_task
+from app.celery_client import send_preprocess_task, send_llm_wiki_preprocess_task
 from app.configurations.configurations import settings
 
 import asyncio
@@ -40,165 +40,20 @@ def _is_native_text(filename: str) -> bool:
     return _extension(filename) in NATIVE_TEXT_EXTENSIONS
 
 
-async def _graphrag_delete_document_graph(
-    kb_id: str, document_id: str, chunk_ids: list[str]
-) -> None:
-    """
-    Delete or trim GraphRAG graph data when a document is removed.
-
-    LightRAG-inspired algorithm:
-    - Entities/relations whose chunk_ids become empty after removing this
-      document's chunks are fully deleted from GRAPHRAG_VDB_ENTITY/RELATION
-      and Neo4j (DETACH DELETE removes incident edges automatically).
-    - Entities/relations that still reference other documents' chunks have
-      their chunk_ids trimmed in PGVector (description kept; no LLM rebuild).
-    - Any GRAPHRAG_VDB_RELATION rows pointing to a deleted entity are also
-      removed (orphan cleanup).
-    """
-    if not chunk_ids:
-        return
-
-    from app.infrastructure.graph.neo4j_store import Neo4jStore
-    from app.infrastructure.connectors.postgres.database import db_session
-    from sqlalchemy import text as sql_text
-
-    chunk_ids_set = set(chunk_ids)
-    session_factory = db_session.get_session()
-    neo4j = Neo4jStore(
-        uri=settings.NEO4J_URI,
-        username=settings.NEO4J_USERNAME,
-        password=settings.NEO4J_PASSWORD,
-        database=settings.NEO4J_DATABASE,
-    )
-
+async def _llm_wiki_delete_document(kb_id: str, document_id: str) -> None:
+    """Remove all Elasticsearch chunks for a document in an llm-wiki KB."""
     try:
-        async with session_factory() as pg:
-            # --- Classify affected entities ---
-            entity_rows = (
-                await pg.execute(
-                    sql_text("""
-                        SELECT id, entity_name, chunk_ids
-                        FROM "GRAPHRAG_VDB_ENTITY"
-                        WHERE workspace = :kb_id
-                          AND chunk_ids && CAST(:chunk_ids AS varchar[])
-                    """),
-                    {"kb_id": kb_id, "chunk_ids": list(chunk_ids_set)},
-                )
-            ).fetchall()
+        from app.infrastructure.search.es_search_service import ElasticsearchSearchService
 
-            entities_to_delete_ids: list[str] = []
-            entities_to_delete_names: list[str] = []
-            entities_to_update: list[tuple[str, list[str]]] = []
-
-            for row in entity_rows:
-                remaining = [c for c in (row.chunk_ids or []) if c not in chunk_ids_set]
-                if not remaining:
-                    entities_to_delete_ids.append(row.id)
-                    entities_to_delete_names.append(row.entity_name)
-                else:
-                    entities_to_update.append((row.id, remaining))
-
-            # --- Classify affected relations ---
-            rel_rows = (
-                await pg.execute(
-                    sql_text("""
-                        SELECT id, source_id, target_id, chunk_ids
-                        FROM "GRAPHRAG_VDB_RELATION"
-                        WHERE workspace = :kb_id
-                          AND chunk_ids && CAST(:chunk_ids AS varchar[])
-                    """),
-                    {"kb_id": kb_id, "chunk_ids": list(chunk_ids_set)},
-                )
-            ).fetchall()
-
-            relations_to_delete_ids: list[str] = []
-            relations_to_delete_pairs: list[tuple[str, str]] = []
-            relations_to_update: list[tuple[str, list[str]]] = []
-
-            for row in rel_rows:
-                remaining = [c for c in (row.chunk_ids or []) if c not in chunk_ids_set]
-                if not remaining:
-                    relations_to_delete_ids.append(row.id)
-                    relations_to_delete_pairs.append((row.source_id, row.target_id))
-                else:
-                    relations_to_update.append((row.id, remaining))
-
-            # --- Apply PGVector changes ---
-            if entities_to_delete_ids:
-                await pg.execute(
-                    sql_text("""
-                        DELETE FROM "GRAPHRAG_VDB_ENTITY"
-                        WHERE workspace = :kb_id AND id = ANY(:ids)
-                    """),
-                    {"kb_id": kb_id, "ids": entities_to_delete_ids},
-                )
-
-            for vdb_id, remaining in entities_to_update:
-                await pg.execute(
-                    sql_text("""
-                        UPDATE "GRAPHRAG_VDB_ENTITY"
-                        SET chunk_ids = :chunk_ids
-                        WHERE workspace = :kb_id AND id = :id
-                    """),
-                    {"kb_id": kb_id, "id": vdb_id, "chunk_ids": remaining},
-                )
-
-            if relations_to_delete_ids:
-                await pg.execute(
-                    sql_text("""
-                        DELETE FROM "GRAPHRAG_VDB_RELATION"
-                        WHERE workspace = :kb_id AND id = ANY(:ids)
-                    """),
-                    {"kb_id": kb_id, "ids": relations_to_delete_ids},
-                )
-
-            for vdb_id, remaining in relations_to_update:
-                await pg.execute(
-                    sql_text("""
-                        UPDATE "GRAPHRAG_VDB_RELATION"
-                        SET chunk_ids = :chunk_ids
-                        WHERE workspace = :kb_id AND id = :id
-                    """),
-                    {"kb_id": kb_id, "id": vdb_id, "chunk_ids": remaining},
-                )
-
-            # --- Orphan cleanup: relations pointing to deleted entities ---
-            if entities_to_delete_names:
-                await pg.execute(
-                    sql_text("""
-                        DELETE FROM "GRAPHRAG_VDB_RELATION"
-                        WHERE workspace = :kb_id
-                          AND (source_id = ANY(:names) OR target_id = ANY(:names))
-                    """),
-                    {"kb_id": kb_id, "names": entities_to_delete_names},
-                )
-
-            await pg.commit()
-
-        # --- Apply Neo4j changes ---
-        # DETACH DELETE removes the node and all its incident edges.
-        if entities_to_delete_names:
-            await neo4j.delete_nodes_batch(kb_id, entities_to_delete_names)
-
-        # Delete relation edges where both endpoints are kept but chunk_ids emptied.
-        if relations_to_delete_pairs:
-            await neo4j.delete_edges_batch(kb_id, relations_to_delete_pairs)
-
-        logger.info(
-            "GraphRAG delete: doc=%s kb=%s | "
-            "entities deleted=%d updated=%d | relations deleted=%d updated=%d",
-            document_id, kb_id,
-            len(entities_to_delete_ids), len(entities_to_update),
-            len(relations_to_delete_ids), len(relations_to_update),
-        )
-
+        es = ElasticsearchSearchService()
+        await es.delete_document_chunks(kb_id=kb_id, document_id=document_id)
+        await es.close()
+        logger.info("llm-wiki ES delete done: doc=%s kb=%s", document_id, kb_id)
     except Exception as exc:
         logger.error(
-            "GraphRAG graph delete failed for doc=%s kb=%s: %s",
+            "llm-wiki ES delete failed: doc=%s kb=%s: %s",
             document_id, kb_id, exc, exc_info=True,
         )
-    finally:
-        await neo4j.close()
 
 
 def _parse_s3_url(url: str) -> Tuple[str, str]:
@@ -306,19 +161,29 @@ class DocumentsService:
         for doc in documents:
             correlation_id = str(uuid4())
 
-            if rag_mode == "graphrag":
+            if rag_mode == "llm-wiki":
                 logger.info(
-                    f"Enqueueing graph_ingest task for document {doc.id} "
-                    f"[rag_mode=graphrag correlation_id={correlation_id}]"
+                    f"Enqueueing llm-wiki ES ingest for document {doc.id} "
+                    f"[rag_mode=llm-wiki correlation_id={correlation_id}]"
                 )
-                send_graph_preprocess_task(
-                    document_id=doc.id,
-                    knowledge_base_id=kb_id,
-                    name=doc.name,
-                    bucket=settings.BUCKET_NAME,
-                    correlation_id=correlation_id,
-                )
-                continue
+                # llm-wiki KBs go through the same parse step as classic
+                # when the file isn't native text; for native text we
+                # bypass parse and dispatch directly. The downstream task
+                # routes by ``rag_mode`` (read off the KB row) so we don't
+                # need separate Celery tasks per mode.
+                if _is_native_text(doc.name):
+                    send_llm_wiki_preprocess_task(
+                        document_id=doc.id,
+                        knowledge_base_id=kb_id,
+                        name=doc.name,
+                        bucket=settings.BUCKET_NAME,
+                        correlation_id=correlation_id,
+                    )
+                    continue
+                # non-native → parse first, then llm-wiki ingest is
+                # triggered from the parse callback. Fall through to the
+                # parse branch below; the worker reads rag_mode and
+                # dispatches accordingly.
 
             if _is_native_text(doc.name):
                 logger.info(
@@ -464,22 +329,35 @@ class DocumentsService:
                 },
             )
 
-            # Hand off to the chunk/embed pipeline.
+            # Hand off to the chunk/embed pipeline. Branch on KB rag_mode so
+            # llm-wiki KBs go through the Elasticsearch ingest path instead
+            # of the classic pgvector chord.
             knowledge_base = await self.knowledge_base_repository.get(id=doc.kb_id)
+            rag_mode = (knowledge_base.parser_config or {}).get("rag_mode", "classic")
             correlation_id = str(uuid4())
             logger.info(
                 f"Parse done for document {doc.id} — dispatching preprocess "
-                f"[markdown_url={markdown_url} correlation_id={correlation_id}]"
+                f"[rag_mode={rag_mode} markdown_url={markdown_url} correlation_id={correlation_id}]"
             )
-            send_preprocess_task(
-                document_id=doc.id,
-                knowledge_base_id=doc.kb_id,
-                name=doc.name,
-                embedding_model_id=knowledge_base.embed_id,
-                bucket=settings.BUCKET_NAME,
-                correlation_id=correlation_id,
-                parsed_markdown_s3_url=markdown_url,
-            )
+            if rag_mode == "llm-wiki":
+                send_llm_wiki_preprocess_task(
+                    document_id=doc.id,
+                    knowledge_base_id=doc.kb_id,
+                    name=doc.name,
+                    bucket=settings.BUCKET_NAME,
+                    correlation_id=correlation_id,
+                    parsed_markdown_s3_url=markdown_url,
+                )
+            else:
+                send_preprocess_task(
+                    document_id=doc.id,
+                    knowledge_base_id=doc.kb_id,
+                    name=doc.name,
+                    embedding_model_id=knowledge_base.embed_id,
+                    bucket=settings.BUCKET_NAME,
+                    correlation_id=correlation_id,
+                    parsed_markdown_s3_url=markdown_url,
+                )
             return
 
         logger.warning("parse-callback: ignoring unknown state=%s for job %s", state, job_id)
@@ -512,6 +390,63 @@ class DocumentsService:
             }
             for doc in documents
         ]
+
+    async def get_preview(self, kb_id: str, doc_id: str) -> Dict[str, Any]:
+        """
+        Build a preview payload for a document: the parsed markdown (if the
+        document went through MinerU) plus every chunk produced by the
+        ingest pipeline.
+
+        Raises:
+            ResourceNotFoundError: If the document does not exist in this kb
+        """
+        documents = await self.document_repository.get(id=doc_id, kb_id=kb_id)
+        if not documents:
+            raise ResourceNotFoundError("Document", doc_id)
+        doc = documents[0]
+
+        parsed_markdown: Optional[str] = None
+        parsed_source: Optional[str] = None  # "parsed" | "original" | None
+        if doc.parsed_markdown_s3_key:
+            try:
+                bucket, key = _parse_s3_url(doc.parsed_markdown_s3_key)
+                parsed_markdown = await self.s3_client_service.get_file_content(bucket, key)
+                parsed_source = "parsed"
+            except Exception as exc:
+                logger.warning(
+                    "preview: failed to fetch parsed markdown for doc %s (%s): %s",
+                    doc_id, doc.parsed_markdown_s3_key, exc,
+                )
+        elif _is_native_text(doc.name):
+            # No MinerU pass — pull the original native-text upload so the
+            # preview still has something to render.
+            try:
+                key = f"{doc.kb_id}/{doc.name}"
+                parsed_markdown = await self.s3_client_service.get_file_content(
+                    settings.BUCKET_NAME, key,
+                )
+                parsed_source = "original"
+            except Exception as exc:
+                logger.warning(
+                    "preview: failed to fetch original source for doc %s (%s/%s): %s",
+                    doc_id, settings.BUCKET_NAME, doc.name, exc,
+                )
+
+        chunks = await self.chunk_repository.get_full_by_document_id(doc_id)
+
+        return {
+            "doc_id": doc.id,
+            "kb_id": doc.kb_id,
+            "name": doc.name,
+            "status": doc.status if isinstance(doc.status, str) else doc.status.value,
+            "parsing_status": doc.parsing_status,
+            "ingesting_status": doc.ingesting_status,
+            "parsed_markdown": parsed_markdown,
+            "parsed_source": parsed_source,
+            "parsed_markdown_s3_key": doc.parsed_markdown_s3_key,
+            "chunks": chunks,
+            "chunk_count": len(chunks),
+        }
 
     async def delete_documents(self, document_ids: List[str]) -> None:
         """
@@ -548,8 +483,7 @@ class DocumentsService:
         Delete a single document: removes the original S3 file, all chunk S3 files,
         and the document record (chunks cascade automatically).
 
-        For GraphRAG knowledge bases, also deletes from the Neo4j graph and
-        GraphRAG vector/KV stores directly (synchronously).
+        For llm-wiki KBs, also removes the document's chunks from Elasticsearch.
 
         Args:
             kb_id: Knowledge base ID the document belongs to
@@ -565,18 +499,11 @@ class DocumentsService:
 
         doc = documents[0]
 
-        # For GraphRAG KBs: delete from graph/vector/KV stores before removing from DB
         knowledge_base = await self.knowledge_base_repository.get(id=kb_id)
         rag_mode = (knowledge_base.parser_config or {}).get("rag_mode", "classic")
 
-        if rag_mode == "graphrag":
-            chunk_ids = await self.chunk_repository.get_ids_by_document_id(doc_id)
-            if chunk_ids:
-                await _graphrag_delete_document_graph(
-                    kb_id=kb_id,
-                    document_id=doc_id,
-                    chunk_ids=chunk_ids,
-                )
+        if rag_mode == "llm-wiki":
+            await _llm_wiki_delete_document(kb_id=kb_id, document_id=doc_id)
 
         # Fetch S3 URLs for all chunks of this document
         chunk_s3_urls = await self.chunk_repository.get_s3_urls_by_document_id(doc_id)
