@@ -103,7 +103,7 @@ export default function ChatWithAgentPage() {
             </div>
             <div>
               <span className="text-sm text-muted-foreground">Temperature</span>
-              <p className="font-medium text-sm">{agent.temperature}</p>
+              <p className="font-medium text-sm">{agent.llm_temperature}</p>
             </div>
             {agent.knowledge_bases && agent.knowledge_bases.length > 0 && (
               <div>

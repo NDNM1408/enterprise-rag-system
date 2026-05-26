@@ -6,11 +6,12 @@ from typing import Any, Dict, Literal, Optional
 class ParserConfig(BaseModel):
     """Optional per-KB configuration for document parsing and RAG mode."""
 
-    rag_mode: Literal["classic", "graphrag"] = Field(
+    rag_mode: Literal["classic", "llm-wiki"] = Field(
         default="classic",
         description=(
             "'classic' — chunk → embed → pgvector pipeline; "
-            "'graphrag' — parse → entity extraction → Neo4j graph"
+            "'llm-wiki' — legal-article-aware chunking + Elasticsearch hybrid "
+            "(BM25 + kNN with RRF), tuned for Vietnamese legal corpora"
         ),
     )
 

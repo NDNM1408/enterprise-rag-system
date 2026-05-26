@@ -45,3 +45,8 @@ class ExternalServiceError(DomainException):
     def __init__(self, service_name: str, message: str, details: dict = None):
         super().__init__(f"{service_name} error: {message}", details)
         self.service_name = service_name
+
+
+class GuardrailError(DomainException):
+    """Raised when guardrail validation fails."""
+    pass

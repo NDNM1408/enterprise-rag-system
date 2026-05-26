@@ -28,6 +28,7 @@ export function DocumentUpload({ kbId }: DocumentUploadProps) {
     accept: {
       "text/html": [".html", ".htm"],
       "text/plain": [".txt"],
+      "text/markdown": [".md", ".markdown"],
       "application/pdf": [".pdf"],
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [
         ".docx",
@@ -63,7 +64,7 @@ export function DocumentUpload({ kbId }: DocumentUploadProps) {
                   {isDragActive ? "Drop files here" : "Drag & drop files here"}
                 </p>
                 <p className="text-sm text-muted-foreground mt-1">
-                  or click to browse (HTML, TXT, PDF, DOCX)
+                  or click to browse (HTML, TXT, MD, PDF, DOCX)
                 </p>
               </div>
             </div>

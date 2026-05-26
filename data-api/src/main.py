@@ -20,6 +20,7 @@ from app.application.controllers.knowledge_base_controller import router as know
 from app.application.controllers.document_controller import router as document_api_router
 from app.application.controllers.health_check_controller import router as health_check_api_router
 from app.application.controllers.query_controller import router as query_api_router
+from app.application.controllers.chatbot_controller import router as chatbot_api_router
 
 # Setup centralized logging
 setup_logging()
@@ -54,6 +55,7 @@ app.include_router(knowledge_base_api_router)
 app.include_router(document_api_router)
 app.include_router(query_api_router)
 app.include_router(health_check_api_router)
+app.include_router(chatbot_api_router)
 
 logger.info("Data-API application initialized")
 

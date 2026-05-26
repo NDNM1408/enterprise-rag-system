@@ -94,7 +94,7 @@ export default function AgentDetailPage() {
             </div>
             <div>
               <span className="text-sm text-muted-foreground">Temperature</span>
-              <p className="font-medium">{agent.temperature}</p>
+              <p className="font-medium">{agent.llm_temperature}</p>
             </div>
             {agent.system_prompt && (
               <div>

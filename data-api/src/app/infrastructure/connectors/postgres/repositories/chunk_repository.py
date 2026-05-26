@@ -18,6 +18,43 @@ class ChunkRepository:
     def __init__(self) -> None:
         self.async_session = db_session.get_session()
 
+    async def get_full_by_document_id(self, document_id: str) -> List[dict]:
+        """
+        Return all chunks for a document with content + parent_text, ordered
+        by insertion time. Used by the preview endpoint to show what the
+        ingest pipeline actually produced.
+
+        Raises:
+            DatabaseError: On DB failure
+        """
+        try:
+            async with self.async_session() as session:
+                result = await session.execute(
+                    select(
+                        Chunk.id,
+                        Chunk.content,
+                        Chunk.parent_text,
+                        Chunk.status,
+                        Chunk.create_time,
+                    )
+                    .where(Chunk.document_id == document_id)
+                    .order_by(Chunk.create_time.asc(), Chunk.id.asc())
+                )
+                return [
+                    {
+                        "id": row.id,
+                        "content": row.content or "",
+                        "parent_text": row.parent_text or "",
+                        "status": (
+                            row.status.value if hasattr(row.status, "value") else row.status
+                        ),
+                    }
+                    for row in result.fetchall()
+                ]
+        except SQLAlchemyError as exc:
+            logger.error(f"Database error in get_full_by_document_id: {exc}")
+            raise DatabaseError(f"Failed to retrieve chunks: {exc}") from exc
+
     async def get_contents_by_document_id(self, document_id: str) -> List[str]:
         """
         Return the text content of all chunks for a given document.

@@ -20,7 +20,7 @@ from app.celery_app import celery_app
 from app.celery_app.tasks import preprocess_tasks  # noqa: F401
 from app.celery_app.tasks import upsert_tasks      # noqa: F401
 from app.celery_app.tasks import dlq_tasks         # noqa: F401
-from app.celery_app.tasks import graph_tasks        # noqa: F401
+from app.celery_app.tasks import llm_wiki_tasks    # noqa: F401
 
 setup_logging()
 logger = logging.getLogger(__name__)

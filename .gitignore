@@ -187,3 +187,8 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# Local scratch files / nested repos cloned for reference
+MinerU/
+ragflow/
+dab1.md
+docker-compose.override.yaml

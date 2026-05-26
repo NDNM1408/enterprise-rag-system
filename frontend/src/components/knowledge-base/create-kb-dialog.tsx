@@ -116,7 +116,9 @@ export function CreateKbDialog({ open, onOpenChange }: CreateKbDialogProps) {
                     </FormControl>
                     <SelectContent>
                       <SelectItem value="classic">Classic (Vector Search)</SelectItem>
-                      <SelectItem value="graphrag">GraphRAG (Graph-based)</SelectItem>
+                      <SelectItem value="llm-wiki">
+                        LLM-Wiki (Elasticsearch hybrid, tuned for Vietnamese legal docs)
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />

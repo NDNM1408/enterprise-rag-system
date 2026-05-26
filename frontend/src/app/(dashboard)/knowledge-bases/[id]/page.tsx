@@ -8,7 +8,9 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DocumentUpload } from "@/components/knowledge-base/document-upload";
 import { DocumentList } from "@/components/knowledge-base/document-list";
-import { ArrowLeft, Loader2, Trash2, Database } from "lucide-react";
+import { KbQuery } from "@/components/knowledge-base/kb-query";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ArrowLeft, Loader2, Trash2, Database, FileText, Search } from "lucide-react";
 
 export default function KnowledgeBaseDetailPage() {
   const params = useParams();
@@ -90,11 +92,25 @@ export default function KnowledgeBaseDetailPage() {
         </CardContent>
       </Card>
 
-      <div className="space-y-4">
-        <h2 className="text-xl font-semibold">Documents</h2>
-        <DocumentUpload kbId={kbId} />
-        <DocumentList kbId={kbId} />
-      </div>
+      <Tabs defaultValue="documents" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="documents" className="gap-2">
+            <FileText className="h-4 w-4" />
+            Documents
+          </TabsTrigger>
+          <TabsTrigger value="query" className="gap-2">
+            <Search className="h-4 w-4" />
+            Try a query
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="documents" className="space-y-4">
+          <DocumentUpload kbId={kbId} />
+          <DocumentList kbId={kbId} />
+        </TabsContent>
+        <TabsContent value="query" className="space-y-4">
+          <KbQuery kbId={kbId} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

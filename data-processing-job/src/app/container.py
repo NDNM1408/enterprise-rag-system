@@ -31,12 +31,6 @@ from app.application.core.parser import DocumentParser
 from app.application.core.markdown_splitter import MarkdownSplitter
 from app.application.services.embedding_service import EmbeddingService
 from app.infrastructure.clients.s3_client_service import S3ClientService
-from app.infrastructure.graph.llm_client import LLMClient
-from app.infrastructure.graph.entity_extractor import EntityExtractor
-from app.infrastructure.graph.neo4j_store import Neo4jStore
-from app.infrastructure.graph.pgvector_store import GraphVectorStore
-from app.infrastructure.graph.graph_merger import GraphMerger
-from app.infrastructure.graph.graph_ingestor import GraphIngestor
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +50,6 @@ class WorkerContainer:
         self._parser: Optional[Any] = None
         self._splitter: Optional[Any] = None
         self._embedding_service: Optional[Any] = None
-        self._neo4j_store: Optional[Any] = None
-        self._graph_ingestor: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Initialization
@@ -86,23 +78,6 @@ class WorkerContainer:
         )
 
         self._embedding_service = EmbeddingService()
-
-        # Graph ingestion pipeline
-        self._neo4j_store = Neo4jStore(
-            uri=settings.NEO4J_URI,
-            username=settings.NEO4J_USERNAME,
-            password=settings.NEO4J_PASSWORD,
-            database=settings.NEO4J_DATABASE,
-        )
-        llm_client = LLMClient(
-            api_base=settings.GRAPHRAG_LLM_API_BASE,
-            model=settings.GRAPHRAG_LLM_MODEL,
-            api_key=settings.GRAPHRAG_LLM_API_KEY,
-        )
-        extractor = EntityExtractor(llm_client=llm_client, max_gleaning=1)
-        vector_store = GraphVectorStore(self._session_factory, self._embedding_service)
-        merger = GraphMerger(self._neo4j_store, vector_store, llm_client)
-        self._graph_ingestor = GraphIngestor(extractor, merger)
 
         self._initialized = True
         logger.info("WorkerContainer initialized (pid=%s)", os.getpid())
@@ -144,18 +119,6 @@ class WorkerContainer:
         """EmbeddingService config wrapper (no event-loop-bound state)."""
         self._ensure()
         return self._embedding_service
-
-    @property
-    def neo4j_store(self) -> Any:
-        """Shared Neo4jStore instance."""
-        self._ensure()
-        return self._neo4j_store
-
-    @property
-    def graph_ingestor(self) -> Any:
-        """GraphIngestor wired with LLM, Neo4j, and PGVector."""
-        self._ensure()
-        return self._graph_ingestor
 
 
 # Module-level singleton accessed by all tasks.
