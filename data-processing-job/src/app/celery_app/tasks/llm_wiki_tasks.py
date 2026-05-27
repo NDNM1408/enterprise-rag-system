@@ -115,6 +115,9 @@ def llm_wiki_preprocess_document(
             chunk_records.append({
                 "id": chunk_id,
                 "content": ch.content,
+                # llm-wiki: each legal article is self-contained; parent_id
+                # self-references so dedupe-by-parent is a no-op here.
+                "parent_id": chunk_id,
                 "parent_text": ch.content,
                 "document_id": document_id,
                 "kb_id": knowledge_base_id,

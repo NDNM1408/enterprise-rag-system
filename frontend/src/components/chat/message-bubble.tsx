@@ -3,8 +3,8 @@
 import { cn } from "@/lib/utils";
 import type { Message } from "@/types";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Bot, User, Copy, Check } from "lucide-react";
-import { useState } from "react";
+import { Bot, User, Copy, Check, Brain, ChevronDown, ChevronRight } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -13,6 +13,52 @@ interface MessageBubbleProps {
   message: Message;
   isStreaming?: boolean;
   streamingContent?: string;
+  streamingThinking?: string;
+}
+
+interface ThinkingBlockProps {
+  thinking: string;
+  isStreaming: boolean;
+  hasContent: boolean;
+}
+
+function ThinkingBlock({ thinking, isStreaming, hasContent }: ThinkingBlockProps) {
+  // Open while thinking is in-flight (no content yet); collapse once the
+  // model starts emitting the answer. User can toggle anytime.
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    if (hasContent && isStreaming) {
+      setOpen(false);
+    }
+  }, [hasContent, isStreaming]);
+
+  const label = isStreaming && !hasContent ? "Thinking…" : "Thoughts";
+
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((s) => !s)}
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {open ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronRight className="h-3 w-3" />
+        )}
+        <Brain className="h-3 w-3" />
+        <span className="font-medium">{label}</span>
+        {isStreaming && !hasContent && (
+          <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+        )}
+      </button>
+      {open && (
+        <div className="border-t border-border/50 px-3 py-2 text-muted-foreground whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto">
+          {thinking}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Approximates the `prose` plugin: spacing + table + code formatting so AI
@@ -54,13 +100,16 @@ export function MessageBubble({
   message,
   isStreaming,
   streamingContent,
+  streamingThinking,
 }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === "human";
   // While streaming, show the live buffer; the persisted message.content is
   // empty until the stream finishes.
   const content = isStreaming ? streamingContent || "" : message.content;
-  const showTypingDots = isStreaming && !content;
+  const thinking = isStreaming ? streamingThinking || "" : message.thinking || "";
+  // Show typing dots only when neither answer nor thinking has arrived yet.
+  const showTypingDots = isStreaming && !content && !thinking;
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(content);
@@ -90,29 +139,38 @@ export function MessageBubble({
           isUser ? "items-end" : "items-start"
         )}
       >
-        <div
-          className={cn(
-            "rounded-2xl px-4 py-2.5",
-            isUser
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted"
-          )}
-        >
-          {showTypingDots ? (
-            <TypingDots />
-          ) : isUser ? (
-            <p className="text-sm whitespace-pre-wrap">{content}</p>
-          ) : (
-            <div className={markdownClasses}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {content}
-              </ReactMarkdown>
-              {isStreaming && (
-                <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1 align-middle" />
-              )}
-            </div>
-          )}
-        </div>
+        {!isUser && thinking && (
+          <ThinkingBlock
+            thinking={thinking}
+            isStreaming={!!isStreaming}
+            hasContent={!!content}
+          />
+        )}
+        {(showTypingDots || content || isUser) && (
+          <div
+            className={cn(
+              "rounded-2xl px-4 py-2.5",
+              isUser
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted"
+            )}
+          >
+            {showTypingDots ? (
+              <TypingDots />
+            ) : isUser ? (
+              <p className="text-sm whitespace-pre-wrap">{content}</p>
+            ) : (
+              <div className={markdownClasses}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {content}
+                </ReactMarkdown>
+                {isStreaming && (
+                  <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1 align-middle" />
+                )}
+              </div>
+            )}
+          </div>
+        )}
         {!isUser && !isStreaming && content && (
           <Button
             variant="ghost"

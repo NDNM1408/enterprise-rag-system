@@ -121,12 +121,15 @@ class TestEmbedContent:
         ids = [r.id for r in rows]
         assert len(ids) == len(set(ids))
 
-    def test_no_generate_chunk_type_field(self):
+    def test_no_chunk_type_field(self):
         """The denormalized model has a single chunk type — the row class
-        must no longer expose a chunk_type field."""
+        must no longer expose a chunk_type field. v4 reintroduces
+        ``parent_id`` (UUID per part) for retrieval-time dedupe."""
         rows = MarkdownSplitter().split("# H\n\nbody.")
         assert not hasattr(rows[0], "chunk_type")
-        assert not hasattr(rows[0], "parent_id")
+        assert hasattr(rows[0], "parent_id")
+        # All children of one part share the same parent_id.
+        assert all(r.parent_id == rows[0].parent_id for r in rows)
 
 
 # ---------------------------------------------------------------------------

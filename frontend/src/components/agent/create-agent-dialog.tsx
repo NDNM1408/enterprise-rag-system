@@ -65,15 +65,19 @@ export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[500px]">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-[500px] flex flex-col max-h-[90vh] p-0">
+        <DialogHeader className="px-6 pt-6">
           <DialogTitle>Create Agent</DialogTitle>
           <DialogDescription>
             Create a new AI agent that can answer questions using your knowledge bases.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+          <form
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="flex flex-col flex-1 min-h-0"
+          >
+            <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4">
             <FormField
               control={form.control}
               name="name"
@@ -165,7 +169,7 @@ export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps
                   <FormControl>
                     <Textarea
                       placeholder="You are a helpful assistant..."
-                      className="resize-none min-h-[100px]"
+                      className="resize-y min-h-[120px] max-h-[320px] overflow-y-auto [field-sizing:fixed]"
                       {...field}
                     />
                   </FormControl>
@@ -176,7 +180,8 @@ export function CreateAgentDialog({ open, onOpenChange }: CreateAgentDialogProps
                 </FormItem>
               )}
             />
-            <DialogFooter>
+            </div>
+            <DialogFooter className="px-6 pb-6 pt-2 border-t bg-background">
               <Button
                 type="button"
                 variant="outline"

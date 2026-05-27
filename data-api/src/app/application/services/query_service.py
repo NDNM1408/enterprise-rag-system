@@ -8,7 +8,7 @@ Modes:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Literal
+from typing import Any, Dict, List, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -26,6 +26,32 @@ from app.infrastructure.repositories.document_embeddings_repository import (
 from app.infrastructure.search.es_search_service import ElasticsearchSearchService
 
 logger = logging.getLogger(__name__)
+
+
+def _dedupe_by_parent(raw: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    """Walk the score-ordered raw rows; collapse children sharing a parent
+    into one entry. Falls back to ``parent_text`` hash when ``parent_id`` is
+    NULL (legacy chunks ingested before v4).
+
+    Returns ≤ ``top_k`` rows — fewer if many children share parents."""
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for row in raw:
+        pid = row.get("parent_id")
+        if pid:
+            key = ("pid", pid)
+        else:
+            pt = row.get("parent_text") or row.get("content") or row.get("text") or ""
+            if not pt:
+                continue
+            key = ("ptxt", hash(pt))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+        if len(out) >= top_k:
+            break
+    return out
 
 
 class QueryService:
@@ -101,21 +127,25 @@ class QueryService:
             logger.error("Embedding failed for kb %s: %s", kb_id, exc, exc_info=True)
             raise DatabaseError(f"Embedding service error: {exc}")
 
+        # v4: over-fetch children so dedupe-by-parent still leaves a usable
+        # top-N after sibling collapse.
+        fetch_k = max(top_k * 3, top_k)
+
         async with self._classic_session_factory() as session:
             repository = DocumentEmbeddingsRepository(session)
             try:
                 if search_type == "semantic":
-                    results = await repository.query_by_vector(
-                        kb_id=kb_id, query_embedding=query_embedding, top_k=top_k,
+                    raw = await repository.query_by_vector(
+                        kb_id=kb_id, query_embedding=query_embedding, top_k=fetch_k,
                     )
                 elif search_type == "hybrid":
-                    results = await repository.hybrid_search(
+                    raw = await repository.hybrid_search(
                         kb_id=kb_id, query_embedding=query_embedding,
-                        query_text=query_text, top_k=top_k, alpha=alpha,
+                        query_text=query_text, top_k=fetch_k, alpha=alpha,
                     )
                 elif search_type == "fuzzy":
-                    results = await repository.fuzzy_search(
-                        kb_id=kb_id, query_text=query_text, top_k=top_k,
+                    raw = await repository.fuzzy_search(
+                        kb_id=kb_id, query_text=query_text, top_k=fetch_k,
                     )
                 else:
                     raise ValidationError(f"Invalid search_type: {search_type}")
@@ -124,6 +154,8 @@ class QueryService:
             except Exception as exc:
                 logger.error("Classic search failed for kb %s: %s", kb_id, exc, exc_info=True)
                 raise DatabaseError(f"Search failed: {exc}")
+
+        results = _dedupe_by_parent(raw, top_k)
 
         return {
             "kb_id": kb_id,

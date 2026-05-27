@@ -113,6 +113,7 @@ export interface Message {
   conversation_id: string;
   role: "human" | "ai" | "system";
   content: string;
+  thinking?: string;
   create_time: string;
 }
 

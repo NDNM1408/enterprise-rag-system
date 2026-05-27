@@ -33,12 +33,14 @@ interface ChatStore {
   isStreaming: boolean;
   messages: Message[];
   currentStreamingContent: string;
+  currentStreamingThinking: string;
   setConversationId: (id: string | null) => void;
   setDraft: (text: string) => void;
   setStreaming: (streaming: boolean) => void;
   addMessage: (msg: Message) => void;
   setMessages: (msgs: Message[]) => void;
   setStreamingContent: (content: string) => void;
+  setStreamingThinking: (thinking: string) => void;
   reset: () => void;
 }
 
@@ -48,12 +50,14 @@ export const useChatStore = create<ChatStore>()((set) => ({
   isStreaming: false,
   messages: [],
   currentStreamingContent: "",
+  currentStreamingThinking: "",
   setConversationId: (conversationId) => set({ conversationId }),
   setDraft: (draft) => set({ draft }),
   setStreaming: (isStreaming) => set({ isStreaming }),
   addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
   setMessages: (messages) => set({ messages }),
   setStreamingContent: (currentStreamingContent) => set({ currentStreamingContent }),
+  setStreamingThinking: (currentStreamingThinking) => set({ currentStreamingThinking }),
   reset: () =>
     set({
       conversationId: null,
@@ -61,5 +65,6 @@ export const useChatStore = create<ChatStore>()((set) => ({
       isStreaming: false,
       messages: [],
       currentStreamingContent: "",
+      currentStreamingThinking: "",
     }),
 }));

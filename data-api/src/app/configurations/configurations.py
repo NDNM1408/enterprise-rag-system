@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     )
     LITELLM_API_KEY: str = Field(default="fake", description="API key for LiteLLM")
 
+    # Extract-then-answer: per-parent fact extraction with cache. When on, the
+    # RAG node extracts atomic facts from each retrieved parent (cached by
+    # parent_id), then answers from facts instead of raw parent text.
+    ENABLE_FACT_EXTRACTION: bool = Field(
+        default=True,
+        description="Enable extract-then-answer pipeline with per-parent fact cache",
+    )
+    FACT_EXTRACTION_MODEL: str = Field(
+        default="gemini-2.5-flash",
+        description="Cheap/fast model for per-parent fact extraction (no thinking)",
+    )
+
     # Data API self-reference (used by chatbot RAG to query its own KB endpoints)
     DATA_API_URL: str = Field(
         default="http://localhost:8000",

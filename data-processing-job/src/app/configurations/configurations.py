@@ -43,12 +43,12 @@ class Settings(BaseSettings):
     DOCUMENT_AI_URL: str = Field(..., description="DocumentAI service URL for HTML parsing")
     GOOGLE_GENAI_API_KEY: Optional[str] = Field(None)
 
-    # Chunking — markdown-aware parent-child splitter
+    # Chunking — v4 part-based parent-child splitter
     TIKTOKEN_MODEL_NAME: str = Field(default="gpt-4o-mini", description="tiktoken model name for token counting")
-    # gemini-embedding-001 input cap is 2048 tokens; target keeps margin for
-    # tokenizer drift between tiktoken (gpt-4o) and Gemini.
-    RETRIEVE_MAX_TOKENS: int = Field(default=2048, ge=64, description="Hard upper bound for retrieve chunks (matches gemini-embedding-001 limit)")
-    RETRIEVE_TARGET_TOKENS: int = Field(default=1800, ge=64, description="Greedy pack target for retrieve chunks")
+    # v4 unifies child cap at 256 tokens; parent context is the whole "part"
+    # (section sliced at each table boundary, ≤1 table per part).
+    RETRIEVE_MAX_TOKENS: int = Field(default=256, ge=64, description="Child chunk hard cap (v4)")
+    RETRIEVE_TARGET_TOKENS: int = Field(default=256, ge=64, description="Child chunk target (v4)")
 
     # Embedding API
     EMBEDDING_API_BASE: str = Field(

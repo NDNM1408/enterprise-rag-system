@@ -92,11 +92,11 @@ export default function ChatWithAgentPage() {
 
       {/* Sidebar - Agent info */}
       <div className="w-80 hidden lg:block">
-        <Card className="h-full">
+        <Card className="h-full flex flex-col">
           <CardHeader>
             <CardTitle className="text-lg">Agent Info</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-4 flex-1 min-h-0 overflow-y-auto">
             <div>
               <span className="text-sm text-muted-foreground">Model</span>
               <p className="font-medium text-sm">{agent.llm_model}</p>
@@ -125,7 +125,7 @@ export default function ChatWithAgentPage() {
             {agent.system_prompt && (
               <div>
                 <span className="text-sm text-muted-foreground">System Prompt</span>
-                <p className="text-xs mt-1 p-2 bg-muted rounded-lg line-clamp-6">
+                <p className="text-xs mt-1 p-2 bg-muted rounded-lg whitespace-pre-wrap break-words">
                   {agent.system_prompt}
                 </p>
               </div>
