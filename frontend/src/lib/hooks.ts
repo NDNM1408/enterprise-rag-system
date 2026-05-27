@@ -380,6 +380,7 @@ export function useChat(agentId: string) {
     addMessage,
     setStreaming,
     setStreamingContent,
+    setStreamingThinking,
   } = useChatStore();
 
   return useMutation<void, Error, string>({
@@ -396,6 +397,7 @@ export function useChat(agentId: string) {
       // 2. Switch the UI into streaming state — empty placeholder bubble
       //    will render a typing indicator until the first token arrives.
       setStreamingContent("");
+      setStreamingThinking("");
       setStreaming(true);
 
       const url = `${api.defaults.baseURL ?? ""}/api/v1/agents/${agentId}/chat/stream`;
@@ -418,6 +420,7 @@ export function useChat(agentId: string) {
       const decoder = new TextDecoder();
       let buffer = "";
       let assembled = "";
+      let assembledThinking = "";
 
       try {
         while (true) {
@@ -439,12 +442,14 @@ export function useChat(agentId: string) {
                 continue;
               }
               // Backend emits JSON-encoded events:
-              //   {type: "meta", conversation_id}
-              //   {type: "delta", content}
+              //   {type: "meta",     conversation_id}
+              //   {type: "delta",    content}    ← answer tokens
+              //   {type: "thinking", delta}      ← reasoning tokens
               try {
                 const event = JSON.parse(payload) as {
                   type: string;
                   content?: string;
+                  delta?: string;
                   conversation_id?: string;
                 };
                 if (event.type === "meta" && event.conversation_id) {
@@ -452,6 +457,9 @@ export function useChat(agentId: string) {
                 } else if (event.type === "delta" && event.content) {
                   assembled += event.content;
                   setStreamingContent(assembled);
+                } else if (event.type === "thinking" && event.delta) {
+                  assembledThinking += event.delta;
+                  setStreamingThinking(assembledThinking);
                 }
               } catch {
                 // Tolerate any non-JSON frame by appending it raw — keeps
@@ -472,9 +480,11 @@ export function useChat(agentId: string) {
         conversation_id: conversationId ?? "",
         role: "ai",
         content: assembled,
+        thinking: assembledThinking || undefined,
         create_time: new Date().toISOString(),
       });
       setStreamingContent("");
+      setStreamingThinking("");
       setStreaming(false);
 
       // The backend assigns / reuses a conversation id; refetch the history

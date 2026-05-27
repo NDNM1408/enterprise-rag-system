@@ -62,6 +62,9 @@ class DocumentEmbeddingsRepository:
             SELECT
                 id AS chunk_id,
                 document_id,
+                doc_name,
+                heading_path,
+                parent_id,
                 content AS text,
                 parent_text,
                 metadata,
@@ -94,6 +97,9 @@ class DocumentEmbeddingsRepository:
                 {
                     'chunk_id': str(row.chunk_id),
                     'document_id': str(row.document_id),
+                    'doc_name': row.doc_name,
+                    'heading_path': row.heading_path,
+                    'parent_id': row.parent_id,
                     'text': row.text,
                     'parent_text': row.parent_text,
                     'metadata': row.metadata,
@@ -136,6 +142,9 @@ class DocumentEmbeddingsRepository:
                 SELECT
                     id AS chunk_id,
                     document_id,
+                    doc_name,
+                    heading_path,
+                    parent_id,
                     content AS text,
                     parent_text,
                     metadata,
@@ -151,6 +160,9 @@ class DocumentEmbeddingsRepository:
                 SELECT
                     id AS chunk_id,
                     document_id,
+                    doc_name,
+                    heading_path,
+                    parent_id,
                     content AS text,
                     parent_text,
                     metadata,
@@ -165,6 +177,9 @@ class DocumentEmbeddingsRepository:
             SELECT DISTINCT
                 COALESCE(v.chunk_id, t.chunk_id) AS chunk_id,
                 COALESCE(v.document_id, t.document_id) AS document_id,
+                COALESCE(v.doc_name, t.doc_name) AS doc_name,
+                COALESCE(v.heading_path, t.heading_path) AS heading_path,
+                COALESCE(v.parent_id, t.parent_id) AS parent_id,
                 COALESCE(v.text, t.text) AS text,
                 COALESCE(v.parent_text, t.parent_text) AS parent_text,
                 COALESCE(v.metadata, t.metadata) AS metadata,
@@ -192,10 +207,13 @@ class DocumentEmbeddingsRepository:
                 {
                     'chunk_id': str(row.chunk_id),
                     'document_id': str(row.document_id),
+                    'doc_name': row.doc_name,
+                    'heading_path': row.heading_path,
+                    'parent_id': row.parent_id,
                     'text': row.text,
                     'parent_text': row.parent_text,
                     'metadata': row.metadata,
-                    'score': float(row.combined_score)
+                    'similarity': float(row.combined_score),
                 }
                 for row in rows
             ]
@@ -230,6 +248,9 @@ class DocumentEmbeddingsRepository:
             SELECT
                 id AS chunk_id,
                 document_id,
+                doc_name,
+                heading_path,
+                parent_id,
                 content AS text,
                 parent_text,
                 metadata,
@@ -256,10 +277,13 @@ class DocumentEmbeddingsRepository:
                 {
                     'chunk_id': str(row.chunk_id),
                     'document_id': str(row.document_id),
+                    'doc_name': row.doc_name,
+                    'heading_path': row.heading_path,
+                    'parent_id': row.parent_id,
                     'text': row.text,
                     'parent_text': row.parent_text,
                     'metadata': row.metadata,
-                    'similarity': float(row.similarity)
+                    'similarity': float(row.similarity),
                 }
                 for row in rows
             ]

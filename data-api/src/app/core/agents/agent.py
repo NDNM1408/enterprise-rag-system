@@ -5,7 +5,7 @@ Provides a simple interface to interact with the LangGraph agent.
 """
 
 import logging
-from typing import Dict, Any, Optional, AsyncIterator
+from typing import Any, AsyncIterator, Dict, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -102,7 +102,7 @@ class ChatbotAgent:
         kb_ids: list,
         conversation_id: Optional[str] = None,
         history: Optional[list] = None,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[Dict[str, str]]:
         """Stream a response.
 
         Bypasses the compiled graph for token streaming — runs guardrail

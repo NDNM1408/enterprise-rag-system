@@ -130,15 +130,36 @@ class ChatbotService:
         )
 
         full_response = []
+        full_thinking = []
 
-        async for chunk in chatbot_agent.stream(
+        async for event in chatbot_agent.stream(
             message=message,
             kb_ids=kb_ids,
             conversation_id=conversation.id,
             history=history,
         ):
-            full_response.append(chunk)
-            yield {"type": "delta", "content": chunk}
+            # Agent emits tagged dicts:
+            #   {"type": "content",  "delta": "..."}  → answer tokens
+            #   {"type": "thinking", "delta": "..."}  → reasoning tokens
+            # Plain strings are tolerated as legacy "content" fallback.
+            if isinstance(event, dict):
+                ev_type = event.get("type", "content")
+                delta = event.get("delta") or event.get("content") or ""
+            else:
+                ev_type = "content"
+                delta = str(event)
+
+            if not delta:
+                continue
+
+            if ev_type == "thinking":
+                full_thinking.append(delta)
+                yield {"type": "thinking", "delta": delta}
+            else:
+                full_response.append(delta)
+                # Keep the legacy ``{type:"delta",content:...}`` shape for the
+                # content stream so the frontend hook doesn't need a flag day.
+                yield {"type": "delta", "content": delta}
 
         await self.conversation_repository.add_message(
             conversation_id=conversation.id,

@@ -273,6 +273,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_DATA_API_URL: http://localhost:8000
+      NEXT_PUBLIC_CHATBOT_API_URL: http://localhost:8000
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-3a3837e7667e18fcd8cd6a02191cba9cb6425caf519990b1c28c17507a6dbf92}
+      AUTH_SECRET: ${AUTH_SECRET:-3a3837e7667e18fcd8cd6a02191cba9cb6425caf519990b1c28c17507a6dbf92}
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/next.config.ts:/app/next.config.ts:ro
+    depends_on:
+      - data-api
+    restart: unless-stopped
+
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.16.1
     container_name: elasticsearch

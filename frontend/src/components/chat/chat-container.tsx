@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./message-bubble";
 import { ChatInput } from "./chat-input";
 import { useChatStore } from "@/lib/stores";
@@ -12,7 +11,12 @@ interface ChatContainerProps {
 }
 
 export function ChatContainer({ onSendMessage, isLoading }: ChatContainerProps) {
-  const { messages, isStreaming, currentStreamingContent } = useChatStore();
+  const {
+    messages,
+    isStreaming,
+    currentStreamingContent,
+    currentStreamingThinking,
+  } = useChatStore();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom on new content (including each streamed token).
@@ -20,7 +24,7 @@ export function ChatContainer({ onSendMessage, isLoading }: ChatContainerProps) 
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, currentStreamingContent, isStreaming]);
+  }, [messages, currentStreamingContent, currentStreamingThinking, isStreaming]);
 
   // Synthetic placeholder for the in-flight AI reply. Until the stream
   // finishes, the real AI message isn't in `messages` yet — this row carries
@@ -38,8 +42,11 @@ export function ChatContainer({ onSendMessage, isLoading }: ChatContainerProps) 
   const hasContent = messages.length > 0 || streamingPlaceholder !== null;
 
   return (
-    <div className="flex flex-col h-full">
-      <ScrollArea className="flex-1 p-4" ref={scrollRef}>
+    <div className="flex flex-col h-full min-h-0">
+      <div
+        ref={scrollRef}
+        className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4"
+      >
         {!hasContent ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center mb-4">
@@ -61,11 +68,12 @@ export function ChatContainer({ onSendMessage, isLoading }: ChatContainerProps) 
                 message={streamingPlaceholder}
                 isStreaming
                 streamingContent={currentStreamingContent}
+                streamingThinking={currentStreamingThinking}
               />
             )}
           </div>
         )}
-      </ScrollArea>
+      </div>
       <ChatInput onSend={onSendMessage} isLoading={isLoading} />
     </div>
   );

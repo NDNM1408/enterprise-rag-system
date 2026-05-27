@@ -78,8 +78,8 @@ class ChunkRepository:
             return
 
         cols = (
-            "id", "content", "parent_text", "document_id", "kb_id", "doc_name",
-            "status", "heading_path", "token_count", "chunk_s3_url",
+            "id", "content", "parent_id", "parent_text", "document_id", "kb_id",
+            "doc_name", "status", "heading_path", "token_count", "chunk_s3_url",
         )
         placeholders = ", ".join(
             "(" + ", ".join(f":{c}_{i}" for c in cols) + ")"
@@ -89,6 +89,7 @@ class ChunkRepository:
         for i, rec in enumerate(records):
             params[f"id_{i}"] = rec["id"]
             params[f"content_{i}"] = rec["content"]
+            params[f"parent_id_{i}"] = rec.get("parent_id")
             params[f"parent_text_{i}"] = rec.get("parent_text")
             params[f"document_id_{i}"] = rec["document_id"]
             params[f"kb_id_{i}"] = rec["kb_id"]

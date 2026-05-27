@@ -1,15 +1,31 @@
 """
 RAG node for retrieving context and generating responses.
+
+Pipeline (extract-then-answer, v4):
+  1. Retrieve top-K child chunks; dedupe by parent_id → list of parents.
+  2. For each parent, load cached facts (``parent_facts`` table). Parents
+     never seen before are fact-extracted in parallel and the results are
+     persisted, so each parent is extracted exactly once across all queries.
+  3. Answer from the aggregated facts (thinking on) instead of raw parent
+     text — exhaustive per-row extraction surfaces details (e.g. BYOK) that
+     a single-pass read over long sections tends to drop.
 """
 
+import asyncio
+import json
 import logging
+import re
 from typing import Dict, Any, List, AsyncIterator
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from app.core.agents.state import ChatbotState
+from app.configurations.configurations import settings
 from app.infrastructure.clients.litellm_client import LiteLLMClient
 from app.infrastructure.clients.data_api_client import DataApiClient
+from app.infrastructure.connectors.postgres.repositories.parent_facts_repository import (
+    ParentFactsRepository,
+)
 from app.exceptions import ExternalServiceError
 
 
@@ -20,6 +36,34 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Use the provided cont
 If the context doesn't contain relevant information, say so and provide a general response based on your knowledge.
 
 Always be helpful, accurate, and professional."""
+
+# Query-INDEPENDENT extraction so the result is cacheable per parent and
+# reused across every future query that retrieves the same parent.
+EXTRACT_SYSTEM_PROMPT = """You are an expert fact extractor for a document knowledge base.
+
+Given a SECTION of a document, extract every atomic fact it states.
+
+Rules:
+1. ONLY extract facts present in the section. Do NOT add outside knowledge.
+2. Each fact is one concise, self-contained atomic statement (one sentence).
+3. Be exhaustive — include ALL facts, even small details.
+4. Preserve specific entities, numbers, names, dates, identifiers, and terminology exactly as written in the section.
+5. If the section contains a table, extract one fact per row, carrying the row's key/label into the fact so it stays self-contained.
+6. Split bullet lists and enumerations into separate facts.
+7. Do NOT answer any question — just extract facts from this section.
+
+Output STRICT JSON only: {"facts": ["fact 1", "fact 2", ...]}"""
+
+ANSWER_FROM_FACTS_PROMPT = """{base}
+
+You are given a QUESTION and a list of FACTS extracted from the retrieved documents.
+
+Rules:
+1. Answer the question using ONLY the provided facts. Do NOT add outside knowledge.
+2. Synthesize the facts into a coherent, complete answer.
+3. If the facts are insufficient, say so honestly — but only after using whatever facts ARE provided.
+4. Match the question's expected breadth — if asked "what specifically did they build", list the specific architectural components / technologies / requirement IDs by name.
+5. Be on-point. Bullet points are fine for lists."""
 
 
 class RAGNode:
@@ -39,6 +83,7 @@ class RAGNode:
         self.model = model
         self.temperature = temperature
         self.system_prompt = system_prompt
+        self.facts_repo = ParentFactsRepository()
 
     async def __call__(self, state: ChatbotState) -> Dict[str, Any]:
         """Retrieve context from knowledge bases and generate response."""
@@ -54,7 +99,7 @@ class RAGNode:
         if not user_query:
             return {"messages": [AIMessage(content="I didn't receive a question. How can I help you?")]}
 
-        context = await self._retrieve_context(kb_ids, user_query)
+        context = await self._build_context(kb_ids, user_query)
         llm_messages = self._build_llm_messages(messages, context)
 
         try:
@@ -71,8 +116,12 @@ class RAGNode:
             logger.error(f"LLM error: {e}")
             raise ExternalServiceError("LLM", str(e))
 
-    async def stream(self, state: ChatbotState) -> AsyncIterator[str]:
-        """Stream response from LLM."""
+    async def stream(self, state: ChatbotState) -> AsyncIterator[Dict[str, str]]:
+        """Stream response from LLM as tagged events.
+
+        Yields ``{"type": "thinking", "delta": "..."}`` for reasoning tokens
+        and ``{"type": "content", "delta": "..."}`` for answer tokens. The
+        chat service forwards these to the SSE controller verbatim."""
         messages = state.get("messages", [])
         kb_ids = state.get("kb_ids", [])
 
@@ -83,43 +132,55 @@ class RAGNode:
                 break
 
         if not user_query:
-            yield "I didn't receive a question. How can I help you?"
+            yield {"type": "content", "delta": "I didn't receive a question. How can I help you?"}
             return
 
-        context = await self._retrieve_context(kb_ids, user_query)
+        context = await self._build_context(kb_ids, user_query)
         llm_messages = self._build_llm_messages(messages, context)
 
         try:
-            async for chunk in self.llm_client.stream_chat(
+            async for event in self.llm_client.stream_chat(
                 messages=llm_messages,
                 model=self.model,
                 temperature=self.temperature,
             ):
-                yield chunk
+                yield event
         except Exception as e:
             logger.error(f"LLM streaming error: {e}")
             raise ExternalServiceError("LLM", str(e))
 
-    # Number of child chunks to retrieve per knowledge base. After global
-    # dedupe by parent, the actual number of parent blocks fed to the LLM
-    # will be <= TOP_K_CHILD (parents sharing children collapse to one).
+    # Number of child chunks to retrieve per knowledge base. The query
+    # endpoint already over-fetches and dedupes by parent_id, so this is
+    # the post-dedupe target count per KB.
     TOP_K_CHILD = 10
 
-    async def _retrieve_context(self, kb_ids: List[str], query: str) -> str:
-        """Retrieve context using parent-child dedupe.
+    async def _build_context(self, kb_ids: List[str], query: str) -> str:
+        """Build the LLM context.
 
-        Pipeline (matches v4-style retrieval):
-          1. Fetch top-K child chunks per KB (vector similarity).
-          2. Flatten across KBs and sort by similarity desc.
-          3. Dedupe by ``parent_text`` — keep the first (highest-scored)
-             occurrence; collapse all sibling children of the same parent.
-          4. Concatenate the surviving parent blocks into the LLM context.
-
-        For graph-RAG knowledge bases the response shape has no chunk list;
-        we fall back to the pre-built ``context`` string.
+        With fact extraction on (default): retrieve parents → load/extract
+        their facts (cached per parent_id) → render facts grouped by source.
+        With it off: fall back to concatenated raw parent text.
         """
-        if not kb_ids:
+        parents, graph_contexts = await self._retrieve_parents(kb_ids, query)
+        if not parents and not graph_contexts:
             return ""
+
+        if not settings.ENABLE_FACT_EXTRACTION:
+            blocks = [p["parent_text"] for p in parents] + graph_contexts
+            return "\n\n---\n\n".join(blocks)
+
+        facts_per_parent = await self._get_or_extract_facts(parents)
+        return self._render_facts_context(parents, facts_per_parent, graph_contexts)
+
+    async def _retrieve_parents(self, kb_ids: List[str], query: str):
+        """Return ``(parents, graph_contexts)``.
+
+        ``parents`` is a score-ordered, parent_id-deduped list of dicts:
+        ``{parent_id, parent_text, document_id, kb_id, doc_name, heading_path}``.
+        ``graph_contexts`` holds pre-built context strings from graph/wiki KBs
+        that have no chunk list (no fact extraction applied to those)."""
+        if not kb_ids:
+            return [], []
 
         per_kb_results = await self.data_api_client.batch_query_knowledge_bases(
             kb_ids=kb_ids,
@@ -142,28 +203,135 @@ class RAGNode:
             elif isinstance(data.get("context"), str) and data["context"].strip():
                 graph_contexts.append(data["context"])
 
-        # Children come back per-KB already sorted; merging multiple KBs needs
-        # a global re-sort so the dedupe always keeps the highest-scored
-        # representative of each parent.
-        all_chunks.sort(key=lambda c: float(c.get("similarity") or 0.0), reverse=True)
+        all_chunks.sort(
+            key=lambda c: float(c.get("similarity") or c.get("score") or 0.0),
+            reverse=True,
+        )
 
-        seen_parents: set = set()
-        parent_blocks: List[str] = []
+        seen: set = set()
+        parents: List[Dict[str, Any]] = []
         for chunk in all_chunks:
             parent_text = chunk.get("parent_text") or chunk.get("content") or chunk.get("text", "")
             if not parent_text:
                 continue
-            # parent_text can be long — hash to keep the set small.
-            key = hash(parent_text)
-            if key in seen_parents:
+            pid = chunk.get("parent_id")
+            key = ("pid", pid) if pid else ("ptxt", hash(parent_text))
+            if key in seen:
                 continue
-            seen_parents.add(key)
-            parent_blocks.append(parent_text)
+            seen.add(key)
+            parents.append({
+                "parent_id": pid,
+                "parent_text": parent_text,
+                "document_id": chunk.get("document_id"),
+                "kb_id": chunk.get("kb_id"),
+                "doc_name": chunk.get("doc_name"),
+                "heading_path": chunk.get("heading_path"),
+            })
 
-        context_parts = parent_blocks + graph_contexts
-        if context_parts:
-            return "\n\n---\n\n".join(context_parts)
-        return ""
+        return parents, graph_contexts
+
+    async def _get_or_extract_facts(self, parents: List[Dict[str, Any]]) -> List[List[str]]:
+        """Return facts per parent (aligned to ``parents`` order).
+
+        Cached parents are loaded from ``parent_facts``; misses are extracted
+        in parallel on the cheap model (no thinking) and persisted so each
+        parent is only ever extracted once. On extraction failure the slot is
+        left empty and the renderer falls back to raw parent text."""
+        pids = [p["parent_id"] for p in parents if p.get("parent_id")]
+        cached = await self.facts_repo.get_many(pids) if pids else {}
+
+        results: List[List[str]] = [[] for _ in parents]
+        to_extract: List[int] = []
+        for i, p in enumerate(parents):
+            pid = p.get("parent_id")
+            if pid and pid in cached:
+                results[i] = cached[pid]
+            else:
+                to_extract.append(i)
+
+        if to_extract:
+            extracted = await asyncio.gather(
+                *(self._extract_one(parents[i]["parent_text"]) for i in to_extract),
+                return_exceptions=True,
+            )
+            save_records = []
+            for i, facts in zip(to_extract, extracted):
+                if isinstance(facts, Exception) or not facts:
+                    if isinstance(facts, Exception):
+                        logger.warning("fact extraction failed for a parent: %s", facts)
+                    continue
+                results[i] = facts
+                pid = parents[i].get("parent_id")
+                if pid:
+                    save_records.append({
+                        "parent_id": pid,
+                        "kb_id": parents[i].get("kb_id"),
+                        "document_id": parents[i].get("document_id"),
+                        "facts_json": json.dumps(facts, ensure_ascii=False),
+                    })
+            if save_records:
+                await self.facts_repo.save_many(save_records)
+
+        logger.info(
+            "fact cache: %d hit, %d extracted (of %d parents)",
+            len(parents) - len(to_extract), len(to_extract), len(parents),
+        )
+        return results
+
+    async def _extract_one(self, parent_text: str) -> List[str]:
+        """Extract atomic facts from one parent on the cheap model, no thinking."""
+        resp = await self.llm_client.chat(
+            messages=[
+                {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
+                {"role": "user", "content": f"SECTION:\n{parent_text}\n\nExtract all facts. Output JSON only."},
+            ],
+            model=settings.FACT_EXTRACTION_MODEL,
+            temperature=0.0,
+            enable_thinking=False,
+        )
+        return self._parse_facts(resp)
+
+    @staticmethod
+    def _parse_facts(text: str) -> List[str]:
+        if not text:
+            return []
+        cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not m:
+                return []
+            try:
+                data = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                return []
+        facts = data.get("facts") if isinstance(data, dict) else None
+        if not isinstance(facts, list):
+            return []
+        return [str(f).strip() for f in facts if str(f).strip()]
+
+    def _render_facts_context(
+        self,
+        parents: List[Dict[str, Any]],
+        facts_per_parent: List[List[str]],
+        graph_contexts: List[str],
+    ) -> str:
+        """Group facts under a per-source header. Parents whose extraction
+        produced nothing fall back to their raw text so no context is lost."""
+        parts: List[str] = []
+        for p, facts in zip(parents, facts_per_parent):
+            doc = p.get("doc_name") or "document"
+            section = p.get("heading_path") or ""
+            header = f"[Source: {doc}" + (f" | Section: {section}]" if section else "]")
+            if facts:
+                body = "\n".join(f"- {f}" for f in facts)
+            else:
+                body = p["parent_text"]
+            parts.append(f"{header}\n{body}")
+        parts.extend(graph_contexts)
+        return "\n\n".join(parts)
 
     def _build_llm_messages(
         self,
@@ -173,7 +341,12 @@ class RAGNode:
         """Build messages list for LLM API call."""
         llm_messages = []
 
-        if context:
+        if context and settings.ENABLE_FACT_EXTRACTION:
+            system_content = (
+                ANSWER_FROM_FACTS_PROMPT.format(base=self.system_prompt)
+                + "\n\nFACTS:\n" + context
+            )
+        elif context:
             system_content = f"{self.system_prompt}\n\n--- Retrieved Context ---\n{context}"
         else:
             system_content = self.system_prompt

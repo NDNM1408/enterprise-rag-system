@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 class ChunkRecord:
     id: str
     content: str                          # text that gets embedded
-    parent_text: str                      # full enclosing section (LLM context)
+    parent_id: str                        # UUID of the part (parent-of-children)
+    parent_text: str                      # rendered part: heading + text + table
     document_id: str
     kb_id: str
     doc_name: str
@@ -206,6 +207,7 @@ class DocumentPreprocessService:
                 ChunkRecord(
                     id=row.id,
                     content=row.content,
+                    parent_id=row.parent_id,
                     parent_text=row.parent_text,
                     document_id=document_id,
                     kb_id=kb_id,
@@ -231,6 +233,7 @@ class DocumentPreprocessService:
                 {
                     "id": r.id,
                     "content": r.content,
+                    "parent_id": r.parent_id,
                     "parent_text": r.parent_text,
                     "document_id": r.document_id,
                     "kb_id": r.kb_id,

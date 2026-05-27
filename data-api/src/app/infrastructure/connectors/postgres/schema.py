@@ -112,7 +112,10 @@ class Chunk(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), unique=True, nullable=False)
     content = Column(Text)
+    parent_id = Column(String, index=True)
     parent_text = Column(Text)
+    heading_path = Column(Text)
+    token_count = Column(Integer)
     document_id = Column(String, ForeignKey(f"{schema}.document.id", ondelete="CASCADE"))
     kb_id = Column(String, ForeignKey(f"{schema}.knowledge_base.id", ondelete="CASCADE"))
     doc_name = Column(String)
