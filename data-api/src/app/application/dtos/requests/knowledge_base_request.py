@@ -14,6 +14,14 @@ class ParserConfig(BaseModel):
             "(BM25 + kNN with RRF), tuned for Vietnamese legal corpora"
         ),
     )
+    agentic_search: bool = Field(
+        default=False,
+        description=(
+            "When true the /query endpoint runs the basin-pivot agentic loop "
+            "(planner LLM fan-out across iterations + per-iter merge) before "
+            "the selector; otherwise single-shot retrieve + selector."
+        ),
+    )
 
     model_config = {"extra": "allow"}  # forward-compatible: unknown keys are preserved
 

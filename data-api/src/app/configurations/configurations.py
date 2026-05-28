@@ -88,6 +88,22 @@ class Settings(BaseSettings):
         description="Over-fetch multiplier before dedup (raw fetch = top_k * this)",
     )
 
+    # Agentic basin-pivot loop (Phase 2) — gated per KB via
+    # ``parser_config.agentic_search``. Falls back to single-shot + selector
+    # when off.
+    AGENTIC_PLANNER_MODEL: str = Field(
+        default="gemini-2.5-flash",
+        description="Planner LLM (basin-pivot fan-out; JSON output; temp=0)",
+    )
+    AGENTIC_MAX_ITER: int = Field(
+        default=5, ge=1, le=10,
+        description="Hard cap on planner iterations",
+    )
+    AGENTIC_TOP_K_PER_ITER: int = Field(
+        default=5, ge=1, le=50,
+        description="Per-sub-query vector top_k per iteration",
+    )
+
     # Data API self-reference (used by chatbot RAG to query its own KB endpoints)
     DATA_API_URL: str = Field(
         default="http://localhost:8000",

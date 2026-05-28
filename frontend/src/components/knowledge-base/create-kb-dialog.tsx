@@ -47,6 +47,7 @@ export function CreateKbDialog({ open, onOpenChange }: CreateKbDialogProps) {
       description: "",
       parser_config: {
         rag_mode: "classic",
+        agentic_search: false,
       },
     },
   });
@@ -121,6 +122,32 @@ export function CreateKbDialog({ open, onOpenChange }: CreateKbDialogProps) {
                       </SelectItem>
                     </SelectContent>
                   </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="parser_config.agentic_search"
+              render={({ field }) => (
+                <FormItem className="flex flex-row items-start gap-3 rounded-md border p-3">
+                  <FormControl>
+                    <input
+                      type="checkbox"
+                      checked={!!field.value}
+                      onChange={(e) => field.onChange(e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-input"
+                    />
+                  </FormControl>
+                  <div className="space-y-1 leading-tight">
+                    <FormLabel className="cursor-pointer">Agentic search</FormLabel>
+                    <p className="text-xs text-muted-foreground">
+                      Planner LLM fans out across multiple pivot axes per query
+                      (up to 5 iterations). Catches cross-basin answers
+                      single-shot retrieval misses — slower but higher recall on
+                      hard queries.
+                    </p>
+                  </div>
                   <FormMessage />
                 </FormItem>
               )}

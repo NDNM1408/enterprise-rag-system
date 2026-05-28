@@ -28,6 +28,7 @@ from app.infrastructure.repositories.document_embeddings_repository import (
     DocumentEmbeddingsRepository,
 )
 from app.infrastructure.search.es_search_service import ElasticsearchSearchService
+from app.application.services.agentic_search_service import AgenticSearchService
 
 logger = logging.getLogger(__name__)
 
@@ -185,10 +186,16 @@ class QueryService:
         if not kb:
             raise ResourceNotFoundError(f"Knowledge base {kb_id} not found")
 
-        rag_mode = (kb.parser_config or {}).get("rag_mode", "classic")
+        parser_config = kb.parser_config or {}
+        rag_mode = parser_config.get("rag_mode", "classic")
+        agentic = bool(parser_config.get("agentic_search", False))
 
         if rag_mode == "llm-wiki":
             return await self._query_llm_wiki(kb_id=kb_id, query_text=query_text, top_k=top_k)
+        if agentic:
+            return await self._query_agentic(
+                kb_id=kb_id, query_text=query_text, top_k=top_k,
+            )
         return await self._query_classic(
             kb_id=kb_id,
             query_text=query_text,
@@ -196,6 +203,35 @@ class QueryService:
             search_type=search_type,
             alpha=alpha,
         )
+
+    # ------------------------------------------------------------------
+    # hier_v2 Phase 2 — agentic basin-pivot loop.
+    # ------------------------------------------------------------------
+
+    async def _query_agentic(
+        self,
+        kb_id: str,
+        query_text: str,
+        top_k: int,
+    ) -> Dict[str, Any]:
+        top_n = top_k if top_k > 0 else settings.SELECTOR_TOP_N
+
+        svc = AgenticSearchService(
+            embedding_client=self._embedding_client,
+            llm_client=self._llm,
+            repository_factory=self._classic_session_factory,
+            selector_fn=_llm_select,
+        )
+        out = await svc.run(kb_id=kb_id, query_text=query_text, top_n=top_n)
+        return {
+            "kb_id": kb_id,
+            "query_type": "hier_v2_agentic",
+            "search_type": "semantic",
+            "query_text": query_text,
+            "results": out["results"],
+            "result_count": len(out["results"]),
+            "agentic": out["agentic"],
+        }
 
     # ------------------------------------------------------------------
     # classic — pgvector
