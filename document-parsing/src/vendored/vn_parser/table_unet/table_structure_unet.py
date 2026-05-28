@@ -42,8 +42,8 @@ class TSRUnet:
         self.inp_height = 1024
         self.inp_width = 1024
 
-        config["intra_op_num_threads"] = get_op_num_threads("MINERU_INTRA_OP_NUM_THREADS")
-        config["inter_op_num_threads"] = get_op_num_threads("MINERU_INTER_OP_NUM_THREADS")
+        config["intra_op_num_threads"] = get_op_num_threads("PARSER_INTRA_OP_NUM_THREADS")
+        config["inter_op_num_threads"] = get_op_num_threads("PARSER_INTER_OP_NUM_THREADS")
 
         self.session = OrtInferSession(config)
 

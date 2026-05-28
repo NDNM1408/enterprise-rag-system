@@ -1,21 +1,21 @@
-"""PDF / image parser backed by MinerU's ``vn_parser``.
+"""PDF / image parser backed by the ``vn_parser`` pipeline.
 
 The ``vn_parser`` package is vendored under ``src/vendored/vn_parser`` and
 imported via ``PYTHONPATH=/app/src/vendored``; only the model weights (3.8 GB
-of ONNX + torch checkpoints) are mounted at runtime via ``MINERU_MODELS_DIR``.
+of ONNX + torch checkpoints) are mounted at runtime via ``PARSER_MODELS_DIR``.
 
 Two execution modes:
 
 * ``hybrid`` (default, ``PDF_HYBRID_MODE=true``) — for PDFs with a text
-  layer, use pdfplumber to harvest text and run MinerU **layout-only** to
+  layer, use pdfplumber to harvest text and run the layout model to
   crop figures/tables/charts. Skips VietOCR entirely (~50–100× faster).
   Pages with no text layer fall back to full OCR.
 
 * ``full`` (``PDF_HYBRID_MODE=false``) — original pipeline: render →
   layout → OCR-det → VietOCR per text block → table struct.
 
-If MinerU isn't installed or its models aren't on disk, importing this module
-raises and the registry falls back to ``pdf_plain``.
+If the vn_parser pipeline isn't installed or its models aren't on disk,
+importing this module raises and the registry falls back to ``pdf_plain``.
 """
 from __future__ import annotations
 
@@ -39,10 +39,10 @@ log = logging.getLogger(__name__)
 # explicit CropBox metadata. Harmless — silence to keep parse logs readable.
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
-_MODELS_DIR = Path(settings.mineru_models_dir)
+_MODELS_DIR = Path(settings.models_dir)
 
 
-def _ensure_mineru_importable() -> None:
+def _ensure_parser_importable() -> None:
     """Verify required model weights exist and the vendored vn_parser imports.
 
     The package itself lives in ``src/vendored/vn_parser`` (added to
@@ -51,20 +51,20 @@ def _ensure_mineru_importable() -> None:
     """
     if not _MODELS_DIR.exists():
         raise RuntimeError(
-            f"MinerU models dir not found: {_MODELS_DIR}. "
-            "Mount weights via MINERU_MODELS_DIR (run MinerU/setup_models.py)."
+            f"Parser models dir not found: {_MODELS_DIR}. "
+            "Mount weights via PARSER_MODELS_DIR."
         )
     required = ("layout.onnx", "ocr_det.onnx")
     missing = [n for n in required if not (_MODELS_DIR / n).exists()]
     if missing:
         raise RuntimeError(
-            f"MinerU models incomplete; missing: {missing} in {_MODELS_DIR}"
+            f"Parser models incomplete; missing: {missing} in {_MODELS_DIR}"
         )
     # Trigger import early so missing python deps surface at startup.
     import vn_parser  # noqa: F401
 
 
-_ensure_mineru_importable()
+_ensure_parser_importable()
 
 _INSTANCE: Any | None = None
 _INSTANCE_LOCK = Lock()
@@ -81,58 +81,45 @@ def _build_parser():
     from vn_parser.layout import LayoutDetector
     from vn_parser.ocr_adapter import OCREngine
     from vn_parser.ocr_det import OCRDet
-    from vn_parser.ocr_rec import VietOCRRec
     from vn_parser.orient_cls import OrientationClassifier
     from vn_parser.table_cls import TableClassifier
 
     from core.devices import (
         describe_provider,
         resolve_onnx_providers,
-        resolve_torch_device,
     )
 
     log.info(
-        "Initializing VNDocParser (models=%s, vlm=%s, hybrid=%s)",
-        _MODELS_DIR, settings.mineru_enable_vlm, settings.pdf_hybrid_mode,
+        "Initializing VNDocParser (models=%s, hybrid=%s)",
+        _MODELS_DIR, settings.pdf_hybrid_mode,
     )
 
-    # Stash VietOCR's vgg_transformer.pth in the persisted ``/root/.cache``
-    # volume instead of /tmp, so a container recreate doesn't trigger a
-    # ~150 MB re-download on next start.
-    import os as _os
-    cached_weights = "/root/.cache/vietocr/vgg_transformer.pth"
-    _os.makedirs(_os.path.dirname(cached_weights), exist_ok=True)
-    if not _os.path.exists(cached_weights) and _os.path.exists("/tmp/vgg_transformer.pth"):
-        # Move existing /tmp copy into the persistent cache.
-        import shutil as _shutil
-        _shutil.move("/tmp/vgg_transformer.pth", cached_weights)
-        log.info("Moved vgg_transformer.pth → %s", cached_weights)
-
-    # Stage 1: build with CPU defaults — fast, gets every component constructed
-    # so we can swap them in stage 2.
-    parser = VNDocParser(
-        models_dir=str(_MODELS_DIR),
-        layout_conf=settings.mineru_layout_conf,
-        vietocr_config=settings.mineru_vietocr_config,
-        vietocr_weights=cached_weights if _os.path.exists(cached_weights) else None,
-        device=resolve_torch_device(settings.device_ocr_rec),  # for VietOCR
-        providers=["CPUExecutionProvider"],
-        enable_vlm=settings.mineru_enable_vlm,
-        vlm_model_path=settings.mineru_vlm_model_path,
-        vlm_dtype=settings.mineru_vlm_dtype,
-    )
-
-    # Stage 2: swap per-stage. ONNX components have ``providers=`` in their
-    # constructors; torch ones have ``device=``.
+    # Per-stage ONNX providers. Every stage — including text recognition —
+    # is ONNX now, so each gets a providers list straight from the device
+    # spec (no torch device resolution).
     layout_providers = resolve_onnx_providers(settings.device_layout)
     ocr_det_providers = resolve_onnx_providers(settings.device_ocr_det)
     orient_providers = resolve_onnx_providers(settings.device_orient)
     table_cls_providers = resolve_onnx_providers(settings.device_table_cls)
-    ocr_rec_device = resolve_torch_device(settings.device_ocr_rec)
+    ocr_rec_providers = resolve_onnx_providers(settings.device_ocr_rec)
 
+    # Build with the resolved providers up front — no stage-2 swap needed
+    # now that recognition is ONNX too.
+    parser = VNDocParser(
+        models_dir=str(_MODELS_DIR),
+        layout_conf=settings.layout_conf,
+        rec_model=settings.rec_model,
+        rec_char_dict=settings.rec_char_dict,
+        rec_img_shape=(3, settings.rec_img_h, settings.rec_img_w),
+        rec_use_space=settings.rec_use_space,
+        rec_providers=ocr_rec_providers,
+        providers=["CPUExecutionProvider"],
+    )
+
+    # Swap the remaining ONNX stages onto their per-stage providers.
     parser.layout = LayoutDetector(
         _MODELS_DIR / "layout.onnx",
-        conf=settings.mineru_layout_conf,
+        conf=settings.layout_conf,
         providers=layout_providers,
     )
     parser.ocr_det = OCRDet(
@@ -150,21 +137,7 @@ def _build_parser():
             providers=table_cls_providers,
         )
 
-    # VietOCR — constructor params include device. Re-init only if device
-    # differs from what stage 1 used.
-    if ocr_rec_device != "cpu":
-        parser.ocr_rec = VietOCRRec(
-            config_name=settings.mineru_vietocr_config,
-            device=ocr_rec_device,
-            weights=cached_weights if _os.path.exists(cached_weights) else None,
-        )
-
-    # Rebuild the OCREngine so it points at the swapped det+rec. table_wired
-    # / table_wireless internally hold a reference to ``ocr_engine`` from
-    # stage-1 init; our swap replaces only what's exposed publicly. The
-    # tables therefore keep using the stage-1 (CPU) ocr_engine — acceptable
-    # because tables are a minor fraction of total work, and the SLANet/UNet
-    # ONNX still benefits from ``device_table_rec`` once we override below.
+    # Rebuild the OCREngine so it points at the swapped det + the ONNX rec.
     parser.ocr_engine = OCREngine(parser.ocr_det, parser.ocr_rec)
 
     if not settings.parse_table_wireless and parser.table_wireless is not None:
@@ -175,7 +148,7 @@ def _build_parser():
         "[devices] layout=%s ocr_det=%s ocr_rec=%s orient=%s table_cls=%s",
         describe_provider(layout_providers),
         describe_provider(ocr_det_providers),
-        ocr_rec_device,
+        describe_provider(ocr_rec_providers),
         describe_provider(orient_providers) if parser.orient else "off",
         describe_provider(table_cls_providers) if parser.table_cls else "off",
     )
@@ -191,8 +164,8 @@ def _get_parser():
     return _INSTANCE
 
 
-class MinerUPdfParser(BaseParser):
-    name = "mineru-vn-parser"
+class LayoutPdfParser(BaseParser):
+    name = "layout-vn-parser"
     extensions = ("pdf", "png", "jpg", "jpeg", "tif", "tiff", "webp", "bmp")
 
     def parse(
@@ -228,8 +201,7 @@ class MinerUPdfParser(BaseParser):
             metadata={
                 "extension": ext.lstrip("."),
                 "mode": mode,
-                "vlm_enabled": settings.mineru_enable_vlm,
-                "dpi": settings.mineru_dpi,
+                "dpi": settings.dpi,
             },
             images=images,
         )
@@ -254,7 +226,7 @@ class MinerUPdfParser(BaseParser):
         if not settings.enable_cpu_batched_pipeline:
             return self._parse_hybrid(input_path, image_dir, progress_cb=progress_cb)
 
-        from parsers.mineru.pipeline_no_ocr import parse_pdf_no_ocr
+        from parsers.pipeline.pipeline_no_ocr import parse_pdf_no_ocr
 
         parser = _get_parser()
         result = parse_pdf_no_ocr(
@@ -274,13 +246,13 @@ class MinerUPdfParser(BaseParser):
         parser = _get_parser()
         results = parser.parse(
             str(input_path),
-            dpi=settings.mineru_dpi,
+            dpi=settings.dpi,
             image_dir=str(image_dir),
         )
         return parser.to_markdown(results), len(results)
 
     # ------------------------------------------------------------------
-    #  hybrid mode — pdfplumber text + MinerU layout-only
+    #  hybrid mode — pdfplumber text + vn_parser layout-only
     # ------------------------------------------------------------------
     def _parse_hybrid(
         self,
@@ -316,7 +288,7 @@ class MinerUPdfParser(BaseParser):
         )
 
         parser = _get_parser()
-        dpi = settings.mineru_dpi
+        dpi = settings.dpi
         scale = dpi / 72.0
         min_words = settings.pdf_block_min_words
 
@@ -736,7 +708,7 @@ def extract_table_both_parallel(
     """Run wired (UNet) + wireless (SLANet+) in parallel, pick the better HTML.
 
     Skips ``TableClassifier`` entirely — empirically the classifier confuses
-    table types often enough that running both and picking via MinerU's
+    table types often enough that running both and picking via the
     ``_select_table_html`` heuristic (cell count vs OCR text coverage vs
     blank-cell rate) is more reliable.
 

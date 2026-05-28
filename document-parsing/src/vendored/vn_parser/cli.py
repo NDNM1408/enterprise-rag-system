@@ -21,10 +21,10 @@ def main():
     p.add_argument("--no-orient", action="store_true",
                    help="Disable orientation correction")
     p.add_argument("--layout-conf", type=float, default=0.5)
-    p.add_argument("--vietocr-config", default="vgg_transformer",
-                   help="VietOCR config name (vgg_transformer|vgg_seq2seq|...)")
-    p.add_argument("--vietocr-weights", default=None,
-                   help="Override VietOCR pretrained weights path")
+    p.add_argument("--rec-model", default="my_latin_rec/model.onnx",
+                   help="Recognition ONNX model path (relative to --models dir)")
+    p.add_argument("--rec-char-dict", default="my_latin_rec/char_dict.txt",
+                   help="PaddleOCR char dictionary (relative to --models dir or abs path)")
     p.add_argument("--save-pages", action="store_true",
                    help="Also save layout-visualized page PNGs")
     args = p.parse_args()
@@ -38,8 +38,8 @@ def main():
         models_dir=args.models,
         enable_orientation=not args.no_orient,
         layout_conf=args.layout_conf,
-        vietocr_config=args.vietocr_config,
-        vietocr_weights=args.vietocr_weights,
+        rec_model=args.rec_model,
+        rec_char_dict=args.rec_char_dict,
     )
 
     print(f"Parsing {in_path} ...")

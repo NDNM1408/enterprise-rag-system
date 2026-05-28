@@ -134,8 +134,8 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_DEFAULT_REGION: ap-southeast-1
-      MINERU_MODELS_DIR: /opt/mineru/models_onnx
-      MINERU_DPI: ${MINERU_DPI:-200}
+      PARSER_MODELS_DIR: /opt/mineru/models_onnx
+      PARSER_DPI: ${PARSER_DPI:-200}
       PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
       PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
       PARSE_TABLE_WIRELESS: ${PARSE_TABLE_WIRELESS:-false}
@@ -176,8 +176,8 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_DEFAULT_REGION: ap-southeast-1
-      MINERU_MODELS_DIR: /opt/mineru/models_onnx
-      MINERU_DPI: ${MINERU_DPI:-200}
+      PARSER_MODELS_DIR: /opt/mineru/models_onnx
+      PARSER_DPI: ${PARSER_DPI:-200}
       PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
       PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
       PARSE_TABLE_WIRELESS: ${PARSE_TABLE_WIRELESS:-false}

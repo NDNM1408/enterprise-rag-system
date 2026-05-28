@@ -1,7 +1,7 @@
-"""OCR engine adapter — wraps OCRDet (DBNet ONNX) + VietOCRRec to look like
-mineru's PytorchPaddleOCR.ocr() interface.
+"""OCR engine adapter — wraps OCRDet (DBNet ONNX) + PaddleOCRRec (ONNX CTC)
+to expose the PaddleOCR ocr() interface.
 
-Contract (mirrors mineru-source/mineru/model/ocr/pytorch_paddle.py:285):
+Contract (mirrors the PaddleOCR ocr() contract):
   ocr(img, det=True,  rec=True ) -> [[(box4x2, (text, score)), ...]]
   ocr(img, det=True,  rec=False) -> [[box4x2, ...]]
   ocr(list_of_imgs, det=False, rec=True ) -> [[(text, score), ...]]
@@ -14,13 +14,13 @@ import cv2
 import numpy as np
 
 from vn_parser.ocr_det import OCRDet
-from vn_parser.ocr_rec import VietOCRRec
+from vn_parser.ocr_rec_onnx import PaddleOCRRec
 
 
 class OCREngine:
-    """Adapter that exposes mineru's expected ocr() signature."""
+    """Adapter that exposes the PaddleOCR ocr() signature."""
 
-    def __init__(self, ocr_det: OCRDet, ocr_rec: VietOCRRec):
+    def __init__(self, ocr_det: OCRDet, ocr_rec: PaddleOCRRec):
         self.det = ocr_det
         self.rec = ocr_rec
         # Some downstream code reads .text_detector — keep a stub for compatibility.
@@ -106,7 +106,7 @@ class OCREngine:
 
 
 class _DetWrapper:
-    """Mimics mineru's `ocr_engine.text_detector(img)` returning (dt_boxes, elapse)
+    """Mimics the `ocr_engine.text_detector(img)` interface returning (dt_boxes, elapse)
     and `text_detector.batch_predict(...)` for the batched OCR-det path.
     """
     def __init__(self, ocr_det: OCRDet):

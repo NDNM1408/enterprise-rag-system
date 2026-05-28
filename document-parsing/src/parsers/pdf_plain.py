@@ -1,6 +1,6 @@
 """Fallback PDF parser (pdfplumber). Text-only, no OCR, no layout intelligence.
 
-Used when MinerU is unavailable or the user passes ``mode=fast``.
+Used when the parsing pipeline is unavailable or the user passes ``mode=fast``.
 """
 from __future__ import annotations
 

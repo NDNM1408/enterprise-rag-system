@@ -95,7 +95,7 @@ def _warmup_parser(**_) -> None:
 
     For prefork pool (default), this runs once per forked process — with
     concurrency=1 that's a single warmup. The heaviest parser by far is
-    MinerUPdfParser → VNDocParser (loads layout/ocr_det/orient_cls ONNX
+    LayoutPdfParser → VNDocParser (loads layout/ocr_det/orient_cls ONNX
     sessions + VietOCR transformer + VGG19 weights). Skipping a failure
     here means the worker keeps serving non-PDF formats; PDF jobs will
     surface the same error individually.
@@ -120,17 +120,17 @@ def _warmup_parser(**_) -> None:
             log.warning("PdfNoOcrParser warmup failed", exc_info=True)
     else:
         try:
-            from parsers.pdf_mineru import _get_parser
+            from parsers.pdf_layout import _get_parser
             parser_instance = _get_parser()
             log.info("VNDocParser ready (models preloaded).")
             try:
                 if _s.enable_cpu_batched_pipeline:
-                    from parsers.mineru.warmup import warm_batched_inference
+                    from parsers.pipeline.warmup import warm_batched_inference
                     warm_batched_inference(parser_instance)
             except Exception:
                 log.warning("Batched-pipeline warmup skipped", exc_info=True)
         except Exception:
-            log.warning("VNDocParser warmup skipped (MinerU unavailable)", exc_info=True)
+            log.warning("VNDocParser warmup skipped (parsing pipeline unavailable)", exc_info=True)
 
     # Prewarm the boto3 client + connection pool to MinIO. Without this
     # the first job pays a 20-30 s penalty for SSL/pool setup against

@@ -17,37 +17,32 @@ from PIL import Image
 
 from vn_parser.layout import LayoutDetector, visualize as visualize_layout
 from vn_parser.ocr_det import OCRDet
-from vn_parser.ocr_rec import VietOCRRec
+from vn_parser.ocr_rec_onnx import PaddleOCRRec
 from vn_parser.ocr_adapter import OCREngine
 from vn_parser.orient_cls import OrientationClassifier
 from vn_parser.table_cls import TableClassifier
 from vn_parser.table_slanet import PaddleTableModel
 from vn_parser.table_unet import UnetWiredTable
-from vn_parser.vlm import VLMExtractor, NOT_EXTRACT_LIST
 
-# Layout label sets — used by both PP-DocLayoutV2 (pipeline) and VLM backends.
-# Pipeline labels (PP-DocLayoutV2 25-class scheme):
+# Layout label sets for the PP-DocLayoutV2 25-class scheme.
 TEXT_LIKE_LABELS = {
     "abstract", "aside_text", "content", "doc_title", "figure_title",
     "footer", "footnote", "header", "number", "paragraph_title",
     "reference", "reference_content", "text", "vertical_text",
     "vision_footnote",
-    # VLM-side text-bearing labels also need OCR fallback when VLM skipped them.
     "title", "page_number", "page_footnote", "ref_text",
     "table_caption", "image_caption", "table_footnote", "image_footnote",
     "code_caption", "list_item", "phonetic",
 }
 IMAGE_LIKE_LABELS = {
-    # pipeline:
     "image", "chart", "header_image", "footer_image", "seal",
-    # VLM:
     "image_block",
 }
 SKIP_LABELS = IMAGE_LIKE_LABELS  # backward-compat alias
 TABLE_LABELS = {"table"}
 FORMULA_LABELS = {
-    "display_formula", "inline_formula", "formula_number",  # pipeline
-    "equation", "equation_block",                           # VLM
+    "display_formula", "inline_formula", "formula_number",
+    "equation", "equation_block",
 }
 CODE_LIKE_LABELS = {"code", "algorithm"}
 
@@ -75,7 +70,7 @@ def _count_table_cells(html_code: str) -> int:
 def _select_table_html(
     wired_html: str, wireless_html: str, ocr_result: list
 ) -> Tuple[str, str]:
-    """Port of MinerU's UnetTableModel.predict switching heuristic.
+    """UnetTableModel.predict switching heuristic.
 
     Returns (kind, html). Compares both models on cell count, OCR text
     coverage, and blank-cell rate to pick the better result.
@@ -178,18 +173,15 @@ class VNDocParser:
         layout_conf: float = 0.5,
         det_box_thresh: float = 0.5,
         det_unclip_ratio: float = 1.6,
-        vietocr_config: str = "vgg_transformer",
-        vietocr_weights: Optional[str] = None,
+        rec_model: str = "my_latin_rec/model.onnx",
+        rec_char_dict: str = "my_latin_rec/char_dict.txt",
+        rec_img_shape: tuple = (3, 48, 960),
+        rec_use_space: bool = True,
+        rec_providers: Optional[Sequence] = None,
         providers: Optional[Sequence[str]] = None,
         drop_inside_seal: bool = True,
-        enable_vlm: bool = False,
-        vlm_model_path: Optional[Union[str, Path]] = None,
-        vlm_dtype: str = "float32",
     ):
         self.drop_inside_seal = drop_inside_seal
-        self.enable_vlm = enable_vlm
-        self._vlm_model_path = vlm_model_path
-        self._vlm_dtype = vlm_dtype
         models = Path(models_dir)
         self.layout = LayoutDetector(
             models / "layout.onnx", conf=layout_conf, providers=providers
@@ -200,8 +192,16 @@ class VNDocParser:
             unclip_ratio=det_unclip_ratio,
             providers=providers,
         )
-        self.ocr_rec = VietOCRRec(
-            config_name=vietocr_config, device=device, weights=vietocr_weights
+        self.ocr_rec = PaddleOCRRec(
+            model_path=models / rec_model,
+            char_dict_path=(
+                Path(rec_char_dict)
+                if Path(rec_char_dict).is_absolute()
+                else models / rec_char_dict
+            ),
+            providers=rec_providers if rec_providers is not None else providers,
+            img_shape=rec_img_shape,
+            use_space=rec_use_space,
         )
         self.orient: Optional[OrientationClassifier] = None
         if enable_orientation and (models / "orient_cls.onnx").exists():
@@ -213,7 +213,7 @@ class VNDocParser:
         self.ocr_engine = OCREngine(self.ocr_det, self.ocr_rec)
 
         # Table pipeline: TabCls + UNet (wired) + SLANet+ (wireless).
-        # Same dual-model + heuristic-switch design as MinerU's UnetTableModel.
+        # Same dual-model + heuristic-switch design as UnetTableModel.
         self.table_cls: Optional[TableClassifier] = None
         self.table_wired: Optional[UnetWiredTable] = None
         self.table_wireless: Optional[PaddleTableModel] = None
@@ -227,19 +227,6 @@ class VNDocParser:
             self.table_wireless = PaddleTableModel(
                 self.ocr_engine, str(models / "table_slanet.onnx")
             )
-
-        # Optional VLM (MinerU2.5-Pro-2604-1.2B). Heavy: ~1.2B params CPU.
-        self.vlm: Optional[VLMExtractor] = None
-        if self.enable_vlm:
-            mp = Path(self._vlm_model_path) if self._vlm_model_path else (Path(__file__).resolve().parent.parent / "models" / "vlm")
-            if mp.exists():
-                self.vlm = VLMExtractor(model_path=mp, dtype=self._vlm_dtype, use_tqdm=False)
-            else:
-                raise FileNotFoundError(
-                    f"VLM enabled but model dir not found: {mp}. "
-                    "Either point vlm_model_path at the MinerU2.5-Pro-2604-1.2B folder, "
-                    "or set enable_vlm=False."
-                )
 
     # ---- Image / PDF loading -----------------------------------------------
     @staticmethod
@@ -284,23 +271,7 @@ class VNDocParser:
             image, angle = self.orient.correct(image)
         w, h = image.size
         page = PageResult(page_index=page_index, width=w, height=h, angle=angle)
-        if self.vlm is not None:
-            vlm_blocks = self.vlm.extract_page(image, not_extract_list=NOT_EXTRACT_LIST)
-            # Adapt VLM blocks to LayoutDetector schema for the rest of the loop.
-            layout_blocks = []
-            for i, b in enumerate(vlm_blocks, start=1):
-                layout_blocks.append({
-                    "cls_id": -1,
-                    "label": b["type"],
-                    "score": 1.0,
-                    "bbox": b["bbox"],
-                    "index": i,
-                    "_vlm_content": b.get("content"),
-                    "_vlm_angle": b.get("angle"),
-                    "_vlm_merge_prev": b.get("merge_prev", False),
-                })
-        else:
-            layout_blocks = self.layout.predict(image)
+        layout_blocks = self.layout.predict(image)
         if self.drop_inside_seal:
             layout_blocks = _drop_inside_seal(layout_blocks)
 
@@ -319,9 +290,6 @@ class VNDocParser:
                 bbox=tuple(r["bbox"]),
                 index=r["index"],
             )
-            vlm_content = r.get("_vlm_content")
-            if vlm_content:
-                block.extra["vlm"] = True
             if block.label in IMAGE_LIKE_LABELS:
                 if save_dir is not None:
                     x0, y0, x1, y1 = block.bbox
@@ -342,31 +310,22 @@ class VNDocParser:
                 continue
 
             if block.label in TABLE_LABELS:
-                # Prefer VLM HTML if VLM produced one; otherwise fall back to
-                # the wired/wireless ONNX pipeline.
-                if vlm_content and "<table" in vlm_content.lower():
-                    block.text = vlm_content
-                    block.extra["table_kind"] = "vlm"
-                else:
-                    block.text = self._extract_table(crop, block)
+                block.text = self._extract_table(crop, block)
             elif block.label in FORMULA_LABELS:
-                # VLM yields LaTeX directly; pipeline backend OCR-concats.
-                block.text = vlm_content if vlm_content else self._read_text(crop)
+                block.text = self._read_text(crop)
             elif block.label in CODE_LIKE_LABELS:
-                block.text = vlm_content if vlm_content else self._read_text(crop)
+                block.text = self._read_text(crop)
             elif block.label in TEXT_LIKE_LABELS:
-                # text-bearing block — prefer VietOCR for Vietnamese accuracy
-                # even if VLM happened to produce content (NOT_EXTRACT_LIST means
-                # VLM should have skipped extraction here, but be defensive).
+                # text-bearing block — ONNX OCR recognition.
                 block.text = self._read_text(crop)
             else:
-                block.text = vlm_content if vlm_content else self._read_text(crop)
+                block.text = self._read_text(crop)
             page.blocks.append(block)
         return page
 
     def _extract_table(self, crop_bgr: np.ndarray, block: "Block") -> str:
         """Run BOTH wired (UNet) and wireless (SLANet+) and pick the better
-        result with the same heuristic MinerU uses (UnetTableModel.predict).
+        result with the same heuristic as UnetTableModel.predict.
         """
         if self.table_wired is None and self.table_wireless is None:
             block.extra["table_kind"] = "fallback"
@@ -409,10 +368,15 @@ class VNDocParser:
         return chosen[1] or self._read_text(crop_bgr)
 
     def _read_text(self, crop_bgr: np.ndarray) -> str:
+        """Detect text quads then run a single batched rec on the whole
+        block. PaddleOCRRec.recognize_batch pads every line to the model
+        width and stacks them into one ONNX call — orders of magnitude
+        faster than recognizing each quad in isolation, especially on GPU.
+        """
         boxes, _ = self.ocr_det.detect(crop_bgr)
         if not boxes:
             return ""
-        # Sort top-to-bottom, then left-to-right
+        # Sort top-to-bottom, then left-to-right.
         items: List[Tuple[float, float, np.ndarray]] = []
         for q in boxes:
             ys = q[:, 1].astype(np.float32)
@@ -420,15 +384,29 @@ class VNDocParser:
             items.append((ys.mean(), xs.min(), q))
         items.sort(key=lambda x: (round(x[0] / 8.0) * 8.0, x[1]))
 
-        lines: List[str] = []
-        cur_line: List[str] = []
-        cur_y: Optional[float] = None
-        line_height_thresh = 12.0
+        # Pre-crop every line, then one batched rec call.
+        valid_ys: List[float] = []
+        line_crops: List[np.ndarray] = []
         for y_mean, _x_min, q in items:
             crop = OCRDet.crop_quad(crop_bgr, q)
             if crop.size == 0:
                 continue
-            text = self.ocr_rec.recognize(crop).strip()
+            valid_ys.append(y_mean)
+            line_crops.append(crop)
+        if not line_crops:
+            return ""
+        try:
+            texts = self.ocr_rec.recognize_batch(line_crops)
+        except Exception:
+            # Fall back to per-line if the batch path fails for any reason.
+            texts = [self.ocr_rec.recognize(c) for c in line_crops]
+
+        lines: List[str] = []
+        cur_line: List[str] = []
+        cur_y: Optional[float] = None
+        line_height_thresh = 12.0
+        for y_mean, raw in zip(valid_ys, texts):
+            text = (raw or "").strip()
             if not text:
                 continue
             if cur_y is None or abs(y_mean - cur_y) <= line_height_thresh:

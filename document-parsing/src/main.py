@@ -8,8 +8,8 @@ Routes:
     GET  /api/v1/health       — registry summary
 
 Lifespan:
-    startup → priming parser registry; if MinerU is available, eagerly
-    instantiate VNDocParser so /parse-image's first request has no
+    startup → priming parser registry; if the parsing pipeline is available,
+    eagerly instantiate VNDocParser so /parse-image's first request has no
     model-load latency.
 """
 from __future__ import annotations
@@ -36,11 +36,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("registry build failed during startup")
 
-    # Eagerly load VNDocParser if MinerU is available — this makes the sync
-    # /parse-image endpoint respond without a 2-3 minute first-request stall.
+    # Eagerly load VNDocParser if the parsing pipeline is available — this makes
+    # the sync /parse-image endpoint respond without a 2-3 minute first-request stall.
     if not settings.pdf_force_plain:
         try:
-            from parsers.pdf_mineru import _get_parser
+            from parsers.pdf_layout import _get_parser
             _get_parser()
             log.info("VNDocParser ready (preloaded for sync /parse-image).")
         except Exception:

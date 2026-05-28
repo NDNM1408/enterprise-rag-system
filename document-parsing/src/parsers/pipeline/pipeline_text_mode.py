@@ -1,6 +1,6 @@
-"""TEXT-mode orchestrator for the CPU-batched MinerU pipeline.
+"""TEXT-mode orchestrator for the CPU-batched vn_parser pipeline.
 
-Driven by ``MinerUPdfParser.parse()`` when ``decide_document_mode`` picks
+Driven by ``LayoutPdfParser.parse()`` when ``decide_document_mode`` picks
 TEXT.  Stages (see SPEC §3):
 
   1. Iterate over pages in chunks of ``settings.page_chunk_size``:
@@ -178,7 +178,7 @@ def parse_text_mode_batched(
         TEXT_LIKE_LABELS,
     )
 
-    dpi = settings.mineru_dpi
+    dpi = settings.dpi
     scale = dpi / 72.0
     sub_dir = image_dir / image_subdir
     sub_dir.mkdir(parents=True, exist_ok=True)

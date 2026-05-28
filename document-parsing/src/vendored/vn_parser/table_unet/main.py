@@ -1,4 +1,4 @@
-"""Wired table recognition (UNet) — vendored from mineru-source.
+"""Wired table recognition (UNet) — vendored from the vn_parser source.
 
 Adapter API expected for `ocr_engine`:
     ocr(img, det=True)  -> [[(bbox_4x2, (text, score)), ...]]
@@ -32,7 +32,7 @@ from .utils_table_recover import (
 
 
 def _calculate_contrast(img: np.ndarray, img_mode: str = "bgr") -> float:
-    """Pure-Python port of mineru.utils.span_pre_proc.calculate_contrast."""
+    """Pure-Python port of the span_pre_proc.calculate_contrast utility."""
     if img is None or img.size == 0:
         return 0.0
     if img.ndim == 2:
@@ -62,8 +62,8 @@ class WiredTableOutput:
 class WiredTableRecognition:
     """Run wired-table structure model + OCR matching to produce HTML.
 
-    Mirrors MinerU's WiredTableRecognition (mineru-source/.../unet_table/main.py)
-    but with mineru.utils dependencies stubbed locally.
+    Mirrors the WiredTableRecognition implementation
+    with upstream dependencies stubbed locally.
     """
 
     def __init__(self, config: WiredTableInput, ocr_engine=None):

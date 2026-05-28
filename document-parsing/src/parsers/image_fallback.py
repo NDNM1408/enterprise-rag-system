@@ -1,4 +1,4 @@
-"""Last-resort image parser when MinerU is unavailable.
+"""Last-resort image parser when the vn_parser pipeline is unavailable.
 
 Returns a markdown image reference (base64 data URI). No OCR.
 """
@@ -34,5 +34,5 @@ class ImageFallbackParser(BaseParser):
             markdown=md,
             parser=self.name,
             page_count=1,
-            metadata={"extension": ext, "note": "no OCR; MinerU unavailable"},
+            metadata={"extension": ext, "note": "no OCR; vn_parser unavailable"},
         )
