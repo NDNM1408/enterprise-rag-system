@@ -29,7 +29,9 @@ services:
     volumes:
       - pgvector-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres"]
+      # Use the actual role we provisioned — `pg_isready -U postgres` floods
+      # the log with FATAL "role 'postgres' does not exist".
+      test: ["CMD", "pg_isready", "-U", "datahub", "-d", "datahub"]
       interval: 30s
       timeout: 10s
       retries: 5
