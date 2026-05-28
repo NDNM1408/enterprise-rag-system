@@ -31,6 +31,7 @@ from app.application.core.parser import DocumentParser
 from app.application.core.markdown_splitter import MarkdownSplitter
 from app.application.services.embedding_service import EmbeddingService
 from app.infrastructure.clients.s3_client_service import S3ClientService
+from app.infrastructure.clients.litellm_chat_client import LiteLLMChatClient
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +72,15 @@ class WorkerContainer:
         self._s3 = S3ClientService()
 
         self._parser = DocumentParser()
+        # hier_v2 splitter — per-table LLM call via the LiteLLM proxy.
+        self._chat = LiteLLMChatClient()
         self._splitter = MarkdownSplitter(
             tokenizer_model=settings.TIKTOKEN_MODEL_NAME,
             retrieve_max_tokens=settings.RETRIEVE_MAX_TOKENS,
             retrieve_target_tokens=settings.RETRIEVE_TARGET_TOKENS,
+            llm_chat=self._chat.chat_json,
+            llm_model=settings.HIER_V2_TABLE_LLM_MODEL,
+            cache_dir=settings.HIER_V2_CACHE_DIR,
         )
 
         self._embedding_service = EmbeddingService()

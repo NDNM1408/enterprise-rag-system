@@ -18,6 +18,23 @@ class ChunkRepository:
     def __init__(self, session_factory) -> None:
         self._sf = session_factory
 
+    async def get_text_for_embedding(self, chunk_id: str) -> Optional[str]:
+        """Return the text the embedder should read.
+
+        hier_v2 writes a dedicated ``embed_text`` (section_path + retrieval
+        text); we prefer that. Legacy chunks (NULL embed_text) fall back to
+        the verbatim ``content``."""
+        async with self._sf() as session:
+            result = await session.execute(
+                text(
+                    "SELECT COALESCE(NULLIF(embed_text, ''), content) "
+                    "FROM chunk WHERE id = :id"
+                ),
+                {"id": chunk_id},
+            )
+            row = result.one_or_none()
+            return row[0] if row else None
+
     async def get_status(self, chunk_id: str) -> Optional[str]:
         """Return chunk status, or None if the chunk is not found."""
         async with self._sf() as session:
@@ -80,6 +97,8 @@ class ChunkRepository:
         cols = (
             "id", "content", "parent_id", "parent_text", "document_id", "kb_id",
             "doc_name", "status", "heading_path", "token_count", "chunk_s3_url",
+            # hier_v2
+            "chunk_type", "embed_text", "table_id", "table_dataframe",
         )
         placeholders = ", ".join(
             "(" + ", ".join(f":{c}_{i}" for c in cols) + ")"
@@ -98,6 +117,10 @@ class ChunkRepository:
             params[f"heading_path_{i}"] = rec.get("heading_path")
             params[f"token_count_{i}"] = rec.get("token_count")
             params[f"chunk_s3_url_{i}"] = rec.get("chunk_s3_url")
+            params[f"chunk_type_{i}"] = rec.get("chunk_type", "text_child")
+            params[f"embed_text_{i}"] = rec.get("embed_text") or rec.get("content")
+            params[f"table_id_{i}"] = rec.get("table_id")
+            params[f"table_dataframe_{i}"] = rec.get("table_dataframe")
 
         query = text(
             "INSERT INTO chunk "

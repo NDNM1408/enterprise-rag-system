@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ChunkRecord:
     id: str
-    content: str                          # text that gets embedded
-    parent_id: str                        # UUID of the part (parent-of-children)
-    parent_text: str                      # rendered part: heading + text + table
+    content: str                          # verbatim chunk (generation reads this)
+    parent_id: Optional[str]              # parent window id, or table_id for segments
+    parent_text: str                      # parent window text or LLM enumeration
     document_id: str
     kb_id: str
     doc_name: str
@@ -39,6 +39,11 @@ class ChunkRecord:
     token_count: Optional[int] = None
     s3_path: Optional[str] = None
     chunk_s3_url: Optional[str] = None
+    # hier_v2
+    chunk_type: str = "text_child"
+    embed_text: str = ""
+    table_id: Optional[str] = None
+    table_dataframe: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -171,9 +176,15 @@ class DocumentPreprocessService:
             return []
 
         # ------------------------------------------------------------------
-        # Split into chunks (markdown-aware parent-child)
+        # Split into chunks (hier_v2: block-bounded parent/child + LLM tables)
         # ------------------------------------------------------------------
-        rows = self.splitter.split(text_content)
+        # Splitter is async because the per-table LLM call lives inside it.
+        # We're already inside an async context (preprocess() is awaited from
+        # the Celery task's asyncio.run wrapper), so call the async API.
+        if hasattr(self.splitter, "asplit"):
+            rows = await self.splitter.asplit(text_content)
+        else:
+            rows = self.splitter.split(text_content)
         if not rows:
             logger.warning("doc=%s: no chunks produced from '%s'", document_id, name)
             await self.doc_repo.set_status(document_id, "Failed")
@@ -217,10 +228,16 @@ class DocumentPreprocessService:
                     token_count=row.tokens,
                     s3_path=s3_path,
                     chunk_s3_url=chunk_s3_url,
+                    chunk_type=row.chunk_type,
+                    embed_text=row.embed_text,
+                    table_id=row.table_id,
+                    table_dataframe=row.table_dataframe,
                     metadata={
                         "chunk_order_index": row.chunk_order_index,
                         "tokens": row.tokens,
                         "heading_path": row.heading_path,
+                        "chunk_type": row.chunk_type,
+                        "table_id": row.table_id,
                     },
                 )
             )
@@ -242,6 +259,10 @@ class DocumentPreprocessService:
                     "heading_path": r.heading_path,
                     "token_count": r.token_count,
                     "chunk_s3_url": r.chunk_s3_url,
+                    "chunk_type": r.chunk_type,
+                    "embed_text": r.embed_text,
+                    "table_id": r.table_id,
+                    "table_dataframe": r.table_dataframe,
                 }
                 for r in records
             ]

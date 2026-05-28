@@ -43,12 +43,25 @@ class Settings(BaseSettings):
     DOCUMENT_AI_URL: str = Field(..., description="DocumentAI service URL for HTML parsing")
     GOOGLE_GENAI_API_KEY: Optional[str] = Field(None)
 
-    # Chunking — v4 part-based parent-child splitter
+    # Chunking — hier_v2 (block-bounded parent/child + LLM-described tables)
     TIKTOKEN_MODEL_NAME: str = Field(default="gpt-4o-mini", description="tiktoken model name for token counting")
-    # v4 unifies child cap at 256 tokens; parent context is the whole "part"
-    # (section sliced at each table boundary, ≤1 table per part).
-    RETRIEVE_MAX_TOKENS: int = Field(default=256, ge=64, description="Child chunk hard cap (v4)")
-    RETRIEVE_TARGET_TOKENS: int = Field(default=256, ge=64, description="Child chunk target (v4)")
+    # hier_v2: child windows ≤ CHILD; parent windows are 2× CHILD. Tables use
+    # a separate row-aligned slicer (segments capped at CHILD too).
+    HIER_V2_CHILD_TOKENS: int = Field(default=512, ge=64, description="Child token window (hier_v2)")
+    HIER_V2_OVERLAP_TOKENS: int = Field(default=50, ge=0, description="Token overlap between sibling children")
+    HIER_V2_OVERLAP_ROWS: int = Field(default=1, ge=0, description="Row overlap between adjacent table segments")
+    HIER_V2_TABLE_LLM_MODEL: str = Field(default="gemini-2.5-flash", description="LLM for per-table summary call")
+    HIER_V2_CACHE_DIR: str = Field(default="/tmp/hier_v2_cache", description="Per-table LLM summary cache dir")
+    # Legacy aliases kept so existing container wiring continues to work.
+    RETRIEVE_MAX_TOKENS: int = Field(default=512, ge=64, description="(legacy alias) → HIER_V2_CHILD_TOKENS")
+    RETRIEVE_TARGET_TOKENS: int = Field(default=512, ge=64, description="(legacy alias) → HIER_V2_CHILD_TOKENS")
+
+    # LiteLLM (used by the table-summary call inside the hier_v2 splitter)
+    LITELLM_API_BASE: str = Field(
+        default="http://litellm:4000/v1",
+        description="OpenAI-compatible LLM API base URL (chat completions)",
+    )
+    LITELLM_API_KEY: str = Field(default="fake", description="API key for LiteLLM")
 
     # Embedding API
     EMBEDDING_API_BASE: str = Field(

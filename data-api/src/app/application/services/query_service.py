@@ -1,14 +1,17 @@
 """Query service — routes by KB ``rag_mode``.
 
 Modes:
-  - ``classic``  — pgvector semantic / hybrid / fuzzy search on the ``chunk`` table.
+  - ``classic``  — hier_v2 pipeline: pgvector single-shot retrieve →
+                   parent/table dedupe → LLM selector → return top-N.
   - ``llm-wiki`` — Elasticsearch BM25 + kNN with client-side RRF fusion.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, List, Literal
+import re
+from typing import Any, Dict, List, Literal, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -17,6 +20,7 @@ from app.configurations.configurations import settings
 from app.configurations.dependencies import get_knowledge_base_repository
 from app.exceptions import DatabaseError, ResourceNotFoundError, ValidationError
 from app.infrastructure.clients.embedding_client import EmbeddingClient
+from app.infrastructure.clients.litellm_client import LiteLLMClient
 from app.infrastructure.connectors.postgres.repositories.knowledge_base_repository import (
     KnowledgeBaseRepository,
 )
@@ -28,30 +32,113 @@ from app.infrastructure.search.es_search_service import ElasticsearchSearchServi
 logger = logging.getLogger(__name__)
 
 
-def _dedupe_by_parent(raw: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
-    """Walk the score-ordered raw rows; collapse children sharing a parent
-    into one entry. Falls back to ``parent_text`` hash when ``parent_id`` is
-    NULL (legacy chunks ingested before v4).
+def _dedupe_chunks(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Two-pass dedupe (score-ordered input):
 
-    Returns ≤ ``top_k`` rows — fewer if many children share parents."""
+    1. ``parent_id`` — collapse text_child siblings of the same parent
+       window, and table_segment siblings of the same table (their
+       parent_id = table_id) to one representative each.
+    2. ``table_id`` — pair a ``table_summary`` and its segment siblings.
+       The first one seen wins (highest score per table).
+    3. Fallback ``hash(parent_text)`` for legacy chunks with NULL parent_id.
+
+    Preserves order; keeps the highest-scored representative."""
     seen: set = set()
     out: List[Dict[str, Any]] = []
     for row in raw:
+        keys = []
         pid = row.get("parent_id")
+        tid = row.get("table_id")
         if pid:
-            key = ("pid", pid)
-        else:
+            keys.append(("pid", pid))
+        if tid:
+            keys.append(("tid", tid))
+        if not keys:
             pt = row.get("parent_text") or row.get("content") or row.get("text") or ""
             if not pt:
                 continue
-            key = ("ptxt", hash(pt))
-        if key in seen:
+            keys.append(("ptxt", hash(pt)))
+        if any(k in seen for k in keys):
             continue
-        seen.add(key)
+        seen.update(keys)
         out.append(row)
-        if len(out) >= top_k:
-            break
     return out
+
+
+def _strip_json_fence(text: str) -> str:
+    s = (text or "").strip()
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```\s*$", "", s)
+    return s
+
+
+async def _llm_select(
+    llm: LiteLLMClient,
+    query: str,
+    candidates: List[Dict[str, Any]],
+    top_n: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Ask gemini-2.5-flash to pick the top_n most relevant chunks.
+
+    Returns ``(selected, fallback)``. ``fallback=True`` means the LLM
+    response couldn't be parsed and we returned the score-order prefix."""
+    if not candidates:
+        return [], False
+    if len(candidates) <= top_n:
+        return candidates, False
+
+    # Build a numbered candidate list — preview the content (≤ 280 chars).
+    lines: List[str] = []
+    for i, r in enumerate(candidates):
+        preview = (r.get("text") or r.get("parent_text") or "").strip()
+        preview = " ".join(preview.split())[:280]
+        src = r.get("doc_name") or "?"
+        sec = (r.get("heading_path") or "")[:60]
+        lines.append(f"[{i}] ({src} · {sec}) {preview}")
+
+    system = (
+        "You are a chunk relevance filter for a RAG pipeline. Given a user "
+        "query and a numbered list of candidate chunks, output the indices "
+        f"of the {top_n} chunks most likely to help answer the query, "
+        "ordered by relevance (most relevant first). Output STRICT JSON only."
+    )
+    user = (
+        f"User query:\n{query}\n\n"
+        f"Candidate chunks ({len(candidates)} total):\n"
+        + "\n".join(lines)
+        + "\n\nOutput JSON only:\n"
+        f'{{"selected_indices": [int, ...]}}  '
+        f"— exactly {top_n} indices, most-relevant first, no duplicates, "
+        f"all in [0, {len(candidates) - 1}]."
+    )
+
+    try:
+        raw = await llm.chat(
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            model=settings.SELECTOR_MODEL,
+            temperature=0.0,
+            enable_thinking=False,
+        )
+        data = json.loads(_strip_json_fence(raw))
+        indices = data.get("selected_indices") or []
+        seen: set = set()
+        picks: List[Dict[str, Any]] = []
+        for ix in indices:
+            if not isinstance(ix, int) or ix < 0 or ix >= len(candidates):
+                continue
+            if ix in seen:
+                continue
+            seen.add(ix)
+            picks.append(candidates[ix])
+            if len(picks) >= top_n:
+                break
+        if picks:
+            return picks, False
+    except Exception as exc:
+        logger.warning("LLM selector failed (%s); falling back to score order", exc)
+
+    return candidates[:top_n], True
 
 
 class QueryService:
@@ -78,6 +165,7 @@ class QueryService:
             expire_on_commit=False,
         )
         self._embedding_client = EmbeddingClient()
+        self._llm = LiteLLMClient()
         self._es_search: ElasticsearchSearchService | None = None
 
     async def query(
@@ -127,9 +215,10 @@ class QueryService:
             logger.error("Embedding failed for kb %s: %s", kb_id, exc, exc_info=True)
             raise DatabaseError(f"Embedding service error: {exc}")
 
-        # v4: over-fetch children so dedupe-by-parent still leaves a usable
-        # top-N after sibling collapse.
-        fetch_k = max(top_k * 3, top_k)
+        # hier_v2: over-fetch so parent/table dedup leaves a useful pool for
+        # the LLM selector to pick from.
+        top_n = top_k if top_k > 0 else settings.SELECTOR_TOP_N
+        fetch_k = max(top_n * settings.SELECTOR_OVERFETCH_MULT, top_n)
 
         async with self._classic_session_factory() as session:
             repository = DocumentEmbeddingsRepository(session)
@@ -155,15 +244,24 @@ class QueryService:
                 logger.error("Classic search failed for kb %s: %s", kb_id, exc, exc_info=True)
                 raise DatabaseError(f"Search failed: {exc}")
 
-        results = _dedupe_by_parent(raw, top_k)
+        deduped = _dedupe_chunks(raw)
+        results, selector_fallback = await _llm_select(
+            self._llm, query_text, deduped, top_n=top_n,
+        )
 
         return {
             "kb_id": kb_id,
-            "query_type": "classic",
+            "query_type": "hier_v2",
             "search_type": search_type,
             "query_text": query_text,
             "results": results,
             "result_count": len(results),
+            "selector": {
+                "raw_count": len(raw),
+                "dedup_count": len(deduped),
+                "model": settings.SELECTOR_MODEL,
+                "fallback_score_order": selector_fallback,
+            },
         }
 
     # ------------------------------------------------------------------

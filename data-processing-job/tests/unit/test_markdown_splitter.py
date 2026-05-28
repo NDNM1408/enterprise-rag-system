@@ -121,15 +121,13 @@ class TestEmbedContent:
         ids = [r.id for r in rows]
         assert len(ids) == len(set(ids))
 
-    def test_no_chunk_type_field(self):
-        """The denormalized model has a single chunk type — the row class
-        must no longer expose a chunk_type field. v4 reintroduces
-        ``parent_id`` (UUID per part) for retrieval-time dedupe."""
-        rows = MarkdownSplitter().split("# H\n\nbody.")
-        assert not hasattr(rows[0], "chunk_type")
-        assert hasattr(rows[0], "parent_id")
-        # All children of one part share the same parent_id.
-        assert all(r.parent_id == rows[0].parent_id for r in rows)
+    def test_chunk_type_field(self):
+        """hier_v2 emits three chunk types tagged on every row."""
+        rows = MarkdownSplitter(llm_chat=None).split("# H\n\nbody.")
+        assert hasattr(rows[0], "chunk_type")
+        assert hasattr(rows[0], "embed_text")
+        # Pure-text doc → only text_child rows.
+        assert {r.chunk_type for r in rows} == {"text_child"}
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +152,29 @@ class TestTableHandling:
 
 
 # ---------------------------------------------------------------------------
-# Constructor guards
+# hier_v2 — table chunks
 # ---------------------------------------------------------------------------
 
-class TestConstructor:
+class TestHierV2Tables:
 
-    def test_target_must_not_exceed_max(self):
-        with pytest.raises(ValueError):
-            MarkdownSplitter(retrieve_max_tokens=100, retrieve_target_tokens=200)
+    def test_table_emits_summary_and_segments(self):
+        """A table block should produce one table_summary + one or more
+        table_segment rows, all sharing the same table_id."""
+        md = (
+            "# Sec\n\n"
+            "intro.\n\n"
+            "| h1 | h2 |\n"
+            "| --- | --- |\n"
+            "| a | b |\n"
+            "| c | d |\n"
+        )
+        rows = MarkdownSplitter(llm_chat=None).split(md)
+        summaries = [r for r in rows if r.chunk_type == "table_summary"]
+        segments = [r for r in rows if r.chunk_type == "table_segment"]
+        assert len(summaries) == 1
+        assert len(segments) >= 1
+        # All table_* rows share one table_id; segments use it as parent_id.
+        tid = summaries[0].table_id
+        assert tid is not None
+        assert all(r.table_id == tid for r in segments)
+        assert all(r.parent_id == tid for r in segments)

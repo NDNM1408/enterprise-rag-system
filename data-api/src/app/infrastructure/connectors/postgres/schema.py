@@ -116,6 +116,11 @@ class Chunk(Base):
     parent_text = Column(Text)
     heading_path = Column(Text)
     token_count = Column(Integer)
+    # hier_v2
+    chunk_type = Column(String, index=True)
+    embed_text = Column(Text)
+    table_id = Column(String, index=True)
+    table_dataframe = Column(Text)
     document_id = Column(String, ForeignKey(f"{schema}.document.id", ondelete="CASCADE"))
     kb_id = Column(String, ForeignKey(f"{schema}.knowledge_base.id", ondelete="CASCADE"))
     doc_name = Column(String)
