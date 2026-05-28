@@ -144,7 +144,7 @@ def _parse_image_inline(payload: bytes, filename: str) -> dict:
     from PIL import Image
 
     from core.timing import StageTimer, timed
-    from parsers.pdf_mineru import _get_parser
+    from parsers.pdf_layout import _get_parser
 
     print(f"[parse-image] start file={filename} bytes={len(payload)}", flush=True)
     overall_start = time.perf_counter()
@@ -169,7 +169,7 @@ def _parse_image_inline(payload: bytes, filename: str) -> dict:
         TEXT_LIKE_LABELS,
     )
     from concurrent.futures import ThreadPoolExecutor
-    from parsers.pdf_mineru import _detect_lines, _group_ocr_lines, extract_table_routed
+    from parsers.pdf_layout import _detect_lines, _group_ocr_lines, extract_table_routed
 
     angle = 0
     with timer.stage("orient_cls"):
@@ -643,8 +643,8 @@ def _parse_pdf_no_ocr_inline(payload: bytes, filename: str, return_images: bool)
     import tempfile
     from pathlib import Path
 
-    from parsers.mineru.pipeline_no_ocr import parse_pdf_no_ocr
-    from parsers.pdf_mineru import _collect_images, _get_parser
+    from parsers.pipeline.pipeline_no_ocr import parse_pdf_no_ocr
+    from parsers.pdf_layout import _collect_images, _get_parser
 
     print(f"[parse-pdf-no-ocr] start file={filename} bytes={len(payload)}", flush=True)
     parser = _get_parser()

@@ -62,19 +62,24 @@ class Settings:
     s3_presigned_ttl: int = _env_int("S3_PRESIGNED_TTL_SECONDS", 3600)
     s3_force_path_style: bool = _env_bool("S3_FORCE_PATH_STYLE", True)
 
-    # ── MinerU vn_parser ──────────────────────────────────────────────
+    # ── vn_parser pipeline ────────────────────────────────────────────
     # Source code is vendored into ``src/vendored/vn_parser`` so the service
     # is self-contained — only the ONNX/torch *weights* are mounted from
     # disk (3.8 GB; not worth baking into the image).
-    mineru_models_dir: str = os.getenv(
-        "MINERU_MODELS_DIR", "/opt/mineru/models_onnx"
+    models_dir: str = os.getenv(
+        "PARSER_MODELS_DIR", "/opt/mineru/models_onnx"
     )
-    mineru_enable_vlm: bool = _env_bool("MINERU_ENABLE_VLM", False)
-    mineru_vlm_model_path: str | None = os.getenv("MINERU_VLM_MODEL_PATH")
-    mineru_vlm_dtype: str = os.getenv("MINERU_VLM_DTYPE", "float32")
-    mineru_layout_conf: float = float(os.getenv("MINERU_LAYOUT_CONF", "0.5"))
-    mineru_dpi: int = _env_int("MINERU_DPI", 200)
-    mineru_vietocr_config: str = os.getenv("MINERU_VIETOCR_CONFIG", "vgg_transformer")
+    layout_conf: float = float(os.getenv("PARSER_LAYOUT_CONF", "0.5"))
+    dpi: int = _env_int("PARSER_DPI", 200)
+
+    # ── OCR recognition (ONNX PaddleOCR CTC — torch-free) ─────────────
+    # Model + char dict live alongside the other ONNX weights in
+    # ``PARSER_MODELS_DIR``. Override the filenames/paths via env if needed.
+    rec_model: str = os.getenv("PARSER_REC_MODEL", "my_latin_rec/model.onnx")
+    rec_char_dict: str = os.getenv("PARSER_REC_CHAR_DICT", "my_latin_rec/char_dict.txt")
+    rec_use_space: bool = _env_bool("PARSER_REC_USE_SPACE", True)
+    rec_img_h: int = _env_int("PARSER_REC_IMG_H", 48)
+    rec_img_w: int = _env_int("PARSER_REC_IMG_W", 960)
 
     # ── Per-stage device selection ───────────────────────────────────
     # Values: "auto" | "cpu" | "cuda" | "cuda:N"

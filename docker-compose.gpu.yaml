@@ -1,0 +1,314 @@
+# Self-contained GPU stack (no overlay needed — pass this single file).
+#
+#   docker compose -f docker-compose.gpu.yaml build
+#   docker compose -f docker-compose.gpu.yaml up -d
+#
+# Identical to docker-compose.yaml except for the two ``document-parsing-*``
+# services, which use Dockerfile.gpu (CUDA 12.4 + cuDNN + onnxruntime-gpu),
+# reserve NVIDIA GPU(s), and default every DEVICE_* to cuda.
+#
+# Requires a Linux host with NVIDIA driver + nvidia-container-toolkit.
+# Docker Desktop on macOS cannot pass GPU through — use docker-compose.yaml
+# (CPU) on the Mac and switch to this file on the GPU host.
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: postgres
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: datahub
+      POSTGRES_PASSWORD: datahub
+      POSTGRES_DB: datahub
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
+    ports:
+      - "4000:4000"
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml
+    command: --config /app/config.yaml --port 4000 --num_workers 1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:4000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.16.1
+    container_name: elasticsearch
+    ports:
+      - "9201:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+      ingest.geoip.downloader.enabled: "false"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  data-api:
+    build:
+      context: ./data-api
+      dockerfile: Dockerfile
+    container_name: data-api
+    ports:
+      - "8000:8000"
+    environment:
+      PGSQL_SCHEMA: public
+      DATABASE_URL: postgresql+asyncpg://datahub:datahub@postgres:5432/datahub
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      BUCKET_NAME: data-hub-preprocessing
+      PORT: 8000
+      MODE: dev
+      S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_SESSION_TOKEN: ""
+      DOCUMENT_PARSING_URL: http://document-parsing-api:8002
+      DOCUMENT_PARSING_CALLBACK_BASE: http://data-api:8000
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-http://litellm:4000/v1}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-rag-embedding-model}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-fake}
+      LITELLM_API_BASE: ${LITELLM_API_BASE:-http://litellm:4000/v1}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-fake}
+      DATA_API_URL: http://data-api:8000
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    volumes:
+      - ./data-api/src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      document-parsing-api:
+        condition: service_started
+    restart: unless-stopped
+
+  data-processing-job-worker:
+    build:
+      context: ./data-processing-job
+      dockerfile: Dockerfile
+    container_name: data-processing-job-worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://datahub:datahub@postgres:5432/datahub
+      PGSQL_SCHEMA: public
+      S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      PREPROCESS_BUCKET_NAME: data-hub-preprocessing
+      UPSERT_BUCKET_NAME: data-hub-upsert
+      DOCUMENT_AI_URL: ${DOCUMENT_AI_URL:-http://document-ai:5000}
+      PRETRAIN_MODEL_PATH: ${PRETRAIN_MODEL_PATH:-intfloat/multilingual-e5-large}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-http://litellm:4000/v1}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-rag-embedding-model}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-fake}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-4}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      MODE: dev
+    volumes:
+      - ./data-processing-job/src:/app/src:ro
+    command: ["/app/docker-entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_DATA_API_URL: http://localhost:8000
+      NEXT_PUBLIC_CHATBOT_API_URL: http://localhost:8000
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-3a3837e7667e18fcd8cd6a02191cba9cb6425caf519990b1c28c17507a6dbf92}
+      AUTH_SECRET: ${AUTH_SECRET:-3a3837e7667e18fcd8cd6a02191cba9cb6425caf519990b1c28c17507a6dbf92}
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/next.config.ts:/app/next.config.ts:ro
+    depends_on:
+      - data-api
+    restart: unless-stopped
+
+  # ── GPU-accelerated parsing services ─────────────────────────────────
+  document-parsing-api:
+    build:
+      context: ./document-parsing
+      dockerfile: Dockerfile.gpu          # CUDA 12.4 + cuDNN + onnxruntime-gpu
+    container_name: document-parsing-api
+    command: ["./docker-entrypoint-api.sh"]
+    ports:
+      - "8002:8002"
+    environment:
+      PORT: 8002
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      DATABASE_URL: postgresql://datahub:datahub@postgres:5432/datahub
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${DOCUMENT_PARSING_BUCKET:-document-parsing}
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      PARSER_MODELS_DIR: /opt/mineru/models_onnx
+      PARSER_DPI: ${PARSER_DPI:-200}
+      PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
+      PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      PARSE_TABLE_WIRELESS: ${PARSE_TABLE_WIRELESS:-false}
+      # GPU defaults — every ONNX stage on CUDA.
+      DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cuda}
+      DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cuda}
+      DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cuda}
+      DEVICE_ORIENT: ${DEVICE_ORIENT:-cuda}
+      DEVICE_TABLE_CLS: ${DEVICE_TABLE_CLS:-cuda}
+      DEVICE_TABLE_REC: ${DEVICE_TABLE_REC:-cuda}
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./document-parsing/src:/app/src:ro
+      - ./document-parsing/models/models_onnx:/opt/mineru/models_onnx:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  document-parsing-worker:
+    build:
+      context: ./document-parsing
+      dockerfile: Dockerfile.gpu
+    container_name: document-parsing-worker
+    environment:
+      CELERY_CONCURRENCY: ${DOCUMENT_PARSING_CONCURRENCY:-2}
+      CELERY_QUEUE: ${CELERY_QUEUE:-parse_queue}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://datahub:datahub@postgres:5432/datahub
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${DOCUMENT_PARSING_BUCKET:-document-parsing}
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: ap-southeast-1
+      PARSER_MODELS_DIR: /opt/mineru/models_onnx
+      PARSER_DPI: ${PARSER_DPI:-200}
+      PDF_HYBRID_MODE: ${PDF_HYBRID_MODE:-true}
+      PDF_FORCE_PLAIN: ${PDF_FORCE_PLAIN:-true}
+      PARSE_TABLE_WIRELESS: ${PARSE_TABLE_WIRELESS:-false}
+      DEVICE_LAYOUT: ${DEVICE_LAYOUT:-cuda}
+      DEVICE_OCR_DET: ${DEVICE_OCR_DET:-cuda}
+      DEVICE_OCR_REC: ${DEVICE_OCR_REC:-cuda}
+      DEVICE_ORIENT: ${DEVICE_ORIENT:-cuda}
+      DEVICE_TABLE_CLS: ${DEVICE_TABLE_CLS:-cuda}
+      DEVICE_TABLE_REC: ${DEVICE_TABLE_REC:-cuda}
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./document-parsing/src:/app/src:ro
+      - ./document-parsing/models/models_onnx:/opt/mineru/models_onnx:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      document-parsing-api:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  minio-data:
+  pgvector-data:
+  elasticsearch-data:

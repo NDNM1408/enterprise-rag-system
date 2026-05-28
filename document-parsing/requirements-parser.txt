@@ -1,4 +1,4 @@
-# ONNX-only stack for the MinerU vn_parser. Installed only in the worker image.
+# ONNX-only stack for the vn_parser pipeline. Installed only in the worker image.
 onnx>=1.16
 onnxruntime-gpu>=1.17
 opencv-python-headless>=4.10

@@ -65,7 +65,7 @@ def warm_batched_inference(parser: Any) -> None:
 
     bs = max(1, settings.layout_batch_size)
     # A4 at the configured DPI (200 by default ≈ 1654 × 2339)
-    dpi = settings.mineru_dpi
+    dpi = settings.dpi
     h = int(round(11.69 * dpi))  # 11.69 in × dpi
     w = int(round(8.27 * dpi))   # 8.27 in × dpi
     dummy_page = _make_dummy_page(h, w)

@@ -12,7 +12,7 @@ from shapely.geometry import Polygon
 
 
 class _DBPostProcess:
-    """Pure-numpy DBPostProcess (port from mineru.../db_postprocess.py)."""
+    """Pure-numpy DBPostProcess (port from the PaddleOCR db_postprocess.py)."""
 
     def __init__(self, thresh=0.3, box_thresh=0.5, max_candidates=1000,
                  unclip_ratio=1.6, score_mode="fast", use_dilation=False):

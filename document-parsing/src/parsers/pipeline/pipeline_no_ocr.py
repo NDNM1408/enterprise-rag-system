@@ -14,7 +14,7 @@ This module is the single source of truth for the diagnostic
 ``/parse-pdf-no-ocr`` endpoint *and* the Celery worker's PDF path. Both
 get the same per-page progress logging via ``print(flush=True)``.
 
-Returns a dict so callers (route handler / ``MinerUPdfParser._parse_pdf``)
+Returns a dict so callers (route handler / ``LayoutPdfParser._parse_pdf``)
 can pull whichever fields they need.
 """
 from __future__ import annotations
@@ -30,6 +30,7 @@ import pdfplumber
 import pypdfium2 as pdfium
 
 from settings import settings
+from vn_parser.ocr_det import OCRDet
 
 log = logging.getLogger(__name__)
 
@@ -153,7 +154,7 @@ def parse_pdf_no_ocr(
     ``image_dir/image_subdir/``; the caller (worker / route handler) is
     responsible for cleanup or upload.
     """
-    from parsers.pdf_mineru import extract_table_both_parallel
+    from parsers.pdf_layout import extract_table_both_parallel
     from vn_parser import VNDocParser
     from vn_parser.pipeline import (
         Block,
@@ -165,7 +166,7 @@ def parse_pdf_no_ocr(
     )
 
     overall_t0 = time.perf_counter()
-    dpi = settings.mineru_dpi
+    dpi = settings.dpi
     scale = dpi / 72.0
     sub_dir = image_dir / image_subdir
     sub_dir.mkdir(parents=True, exist_ok=True)
@@ -192,6 +193,15 @@ def parse_pdf_no_ocr(
     total_tables = 0
     total_orphans = 0
     total_rotated_dropped = 0
+    total_ocr_blocks = 0
+
+    # OCR fallback is available only when the caller passed a full VNDocParser
+    # (job/PDF path) with a recognition engine. The slim ``/parse-pdf-no-ocr``
+    # diagnostic parser has no OCR — it stays pure pdfplumber.
+    ocr_available = (
+        getattr(parser, "ocr_engine", None) is not None
+        and hasattr(parser, "_read_text")
+    )
 
     try:
         with pdfplumber.open(str(pdf_path)) as plumber:
@@ -234,6 +244,11 @@ def parse_pdf_no_ocr(
                 bgr_lazy: np.ndarray | None = None
                 consumed: set[int] = set()
                 page_tables_count = 0
+                # Per-page OCR batch: collect line crops from every scan-only
+                # text block on this page so one mega ``recognize_batch`` call
+                # handles them all (instead of one batched-rec per block).
+                # Each entry: (block_ref, [y_means], [x_mins], [line_crops]).
+                pending_ocr_blocks: list = []
                 t_tables_total = 0.0
 
                 for lb in layout_blocks:
@@ -284,10 +299,17 @@ def parse_pdf_no_ocr(
                                 pre_ocr = _build_precomputed_ocr_for_table(
                                     words, (x0, y0, x1, y1), scale,
                                 )
+                                # Scanned table (no embedded words): drop the
+                                # empty precomputed_ocr so the extractor runs
+                                # ONNX OCR on the cells instead of emitting a
+                                # blank table.
+                                table_pre = pre_ocr
+                                if not pre_ocr and ocr_available:
+                                    table_pre = None
                                 t_t0 = time.perf_counter()
                                 try:
                                     _, html = extract_table_both_parallel(
-                                        parser, tbl_crop, precomputed_ocr=pre_ocr,
+                                        parser, tbl_crop, precomputed_ocr=table_pre,
                                     )
                                 except Exception:
                                     log.exception(
@@ -343,11 +365,99 @@ def parse_pdf_no_ocr(
                                     if ln.strip()
                                 )
                             block.extra["text_source"] = "pdfplumber"
+                        elif ocr_available:
+                            # No embedded text under this block → it's a
+                            # scanned/image region. Run det now (per-block,
+                            # variable crop size); defer rec — every line
+                            # from every scan block on this page is recognised
+                            # in a single mega ``recognize_batch`` call after
+                            # the layout loop.
+                            if bgr_lazy is None:
+                                bgr_lazy = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                            ocr_crop = bgr_lazy[by0:by1, bx0:bx1]
+                            if ocr_crop.size > 0:
+                                try:
+                                    boxes, _ = parser.ocr_det.detect(ocr_crop)
+                                except Exception:
+                                    boxes = []
+                                ys: list[float] = []
+                                xs: list[float] = []
+                                line_crops: list[np.ndarray] = []
+                                for q in boxes:
+                                    lc = OCRDet.crop_quad(ocr_crop, q)
+                                    if lc.size == 0:
+                                        continue
+                                    ys.append(float(q[:, 1].mean()))
+                                    xs.append(float(q[:, 0].min()))
+                                    line_crops.append(lc)
+                                if line_crops:
+                                    pending_ocr_blocks.append(
+                                        (block, ys, xs, line_crops)
+                                    )
+                                    block.extra["text_source"] = "ocr"
                         page.blocks.append(block)
                         continue
 
                     # Unknown / unsupported label — keep but leave empty.
                     page.blocks.append(block)
+
+                # ── Mega-batched rec for every scan text block on this page ──
+                # Stack every line crop from every pending block into ONE
+                # ``recognize_batch`` call. PaddleOCRRec pads each line to the
+                # model width and runs them as a single ONNX batch — orders
+                # of magnitude fewer calls than per-block batched-rec, the
+                # full benefit landing on GPU.
+                if pending_ocr_blocks:
+                    all_line_crops: list[np.ndarray] = []
+                    spans: list[tuple] = []   # (block, ys, xs, start, end)
+                    for blk, ys, xs, crops in pending_ocr_blocks:
+                        spans.append((blk, ys, xs, len(all_line_crops),
+                                      len(all_line_crops) + len(crops)))
+                        all_line_crops.extend(crops)
+                    if all_line_crops:
+                        t_ocr0 = time.perf_counter()
+                        try:
+                            all_texts = parser.ocr_rec.recognize_batch(all_line_crops)
+                        except Exception:
+                            log.exception("page %d OCR mega-batch failed; falling back per-crop", i)
+                            all_texts = [parser.ocr_rec.recognize(c) for c in all_line_crops]
+                        t_ocr_ms = (time.perf_counter() - t_ocr0) * 1000
+                        print(
+                            f"{log_prefix}   ocr page={i + 1} blocks={len(spans)} "
+                            f"lines={len(all_line_crops)} ms={t_ocr_ms:.0f}",
+                            flush=True,
+                        )
+
+                    line_height_thresh = 12.0
+                    for blk, ys, xs, s, e in spans:
+                        triples = list(zip(ys, xs, all_texts[s:e]))
+                        # Sort top-to-bottom (quantised) then left-to-right.
+                        triples.sort(key=lambda t: (round(t[0] / 8.0) * 8.0, t[1]))
+                        lines: list[str] = []
+                        cur_line: list[str] = []
+                        cur_y: Optional[float] = None
+                        for y_mean, _x_min, raw in triples:
+                            text = (raw or "").strip()
+                            if not text:
+                                continue
+                            if cur_y is None or abs(y_mean - cur_y) <= line_height_thresh:
+                                cur_line.append(text)
+                                cur_y = y_mean if cur_y is None else cur_y
+                            else:
+                                lines.append(" ".join(cur_line))
+                                cur_line = [text]
+                                cur_y = y_mean
+                        if cur_line:
+                            lines.append(" ".join(cur_line))
+                        if not lines:
+                            continue
+                        joined = "\n".join(lines)
+                        if blk.label in TITLE_LABELS:
+                            joined = " ".join(
+                                ln.strip() for ln in joined.splitlines() if ln.strip()
+                            )
+                        blk.text = joined
+                        total_ocr_blocks += 1
 
                 orphans = [w for wi, w in enumerate(words) if wi not in consumed]
                 if orphans:
@@ -399,9 +509,11 @@ def parse_pdf_no_ocr(
     markdown = VNDocParser.to_markdown(results)
     overall_ms = (time.perf_counter() - overall_t0) * 1000
     # ``mode`` lives in a ``VARCHAR(64)`` DB column → keep it terse.
+    # ``ocr=N`` = text blocks recognised by ONNX OCR (scanned/image regions);
+    # 0 means the whole doc was born-digital (pure pdfplumber).
     mode = (
-        f"no-ocr:p={n_pages},t={total_tables},o={total_orphans},"
-        f"rd={total_rotated_dropped}"
+        f"hybrid:p={n_pages},t={total_tables},o={total_orphans},"
+        f"rd={total_rotated_dropped},ocr={total_ocr_blocks}"
     )
     print(
         f"{log_prefix} DONE total={overall_ms:.0f}ms pages={n_pages} "

@@ -1,6 +1,6 @@
 """Map file extensions to parser instances.
 
-Parsers are imported lazily so a missing optional dep (e.g. MinerU torch stack)
+Parsers are imported lazily so a missing optional dep (e.g. the vn_parser stack)
 only breaks the parser that needs it, not the whole service.
 """
 from __future__ import annotations
@@ -45,16 +45,16 @@ def _build_registry() -> None:
         except Exception:
             log.exception("Failed to register %s", cls.__name__)
 
-    # PDF: prefer full MinerU (with OCR) when configured; otherwise use the
+    # PDF: prefer the full layout+OCR pipeline when configured; otherwise use the
     # layout-aware no-OCR pipeline (PP-DocLayoutV2 + table struct + pdfplumber,
     # no torch/VietOCR). Fall back to pure pdfplumber if neither initialises.
     pdf_parser: BaseParser | None = None
     if not settings.pdf_force_plain:
         try:
-            from parsers.pdf_mineru import MinerUPdfParser
-            pdf_parser = MinerUPdfParser()
+            from parsers.pdf_layout import LayoutPdfParser
+            pdf_parser = LayoutPdfParser()
         except Exception as e:
-            log.warning("MinerU parser unavailable: %s", e)
+            log.warning("Layout parser unavailable: %s", e)
 
     if pdf_parser is None:
         try:
@@ -68,9 +68,9 @@ def _build_registry() -> None:
     else:
         _register(PdfPlainParser())
 
-    # Image fallback: MinerU's parser already covers image extensions; only
-    # register the explicit fallback when MinerU isn't in play.
-    if pdf_parser is None or pdf_parser.name != "mineru-vn-parser":
+    # Image fallback: LayoutPdfParser already covers image extensions; only
+    # register the explicit fallback when the layout parser isn't in play.
+    if pdf_parser is None or pdf_parser.name != "layout-vn-parser":
         try:
             from parsers.image_fallback import ImageFallbackParser
             _register(ImageFallbackParser())

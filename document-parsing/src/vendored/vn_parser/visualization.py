@@ -1,9 +1,9 @@
-"""Layout visualization in MinerU's style.
+"""Layout visualization utilities.
 
 Filled translucent rectangles colored per category + reading-order numbers
 drawn outside each block (top-right corner, red).
 
-Color palette ported from mineru-source/mineru/utils/draw_bbox.py.
+Color palette ported from the vn_parser draw_bbox utility.
 """
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def draw_layout(
     show_label: bool = True,
     number_color: Tuple[int, int, int] = (255, 0, 0),
 ) -> Image.Image:
-    """Render the MinerU-style overlay.
+    """Render the layout overlay.
 
     blocks: list of dicts {label, bbox=[x0,y0,x1,y1], index, score}.
     Returns a new PIL.Image (RGB).
