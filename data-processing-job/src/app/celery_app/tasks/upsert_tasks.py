@@ -65,24 +65,31 @@ def upsert_chunk(
 
         try:
             # ------------------------------------------------------------------
-            # Fetch chunk text from S3
+            # Pick the text the embedder should read.
+            # hier_v2: chunk.embed_text (section_path + retrieval text).
+            # Legacy / null: fall back to S3 content (verbatim chunk body).
             # ------------------------------------------------------------------
-            logger.info(
-                "%s chunk=%s fetching from S3: %s/%s/%s",
-                log_prefix, chunk_id, settings.UPSERT_BUCKET_NAME, knowledge_base_id, s3_path,
-            )
-            text_content = await container.s3.get_txt_file_content(
-                settings.UPSERT_BUCKET_NAME,
-                f"{knowledge_base_id}/{s3_path}",
-            )
-            if not text_content:
-                raise ValueError(f"Empty text content for chunk {chunk_id}")
+            embed_input = await chunk_repo.get_text_for_embedding(chunk_id)
+            if not embed_input:
+                logger.info(
+                    "%s chunk=%s no embed_text in DB, falling back to S3 %s/%s/%s",
+                    log_prefix, chunk_id, settings.UPSERT_BUCKET_NAME,
+                    knowledge_base_id, s3_path,
+                )
+                embed_input = await container.s3.get_txt_file_content(
+                    settings.UPSERT_BUCKET_NAME,
+                    f"{knowledge_base_id}/{s3_path}",
+                )
+            if not embed_input:
+                raise ValueError(f"No text available to embed for chunk {chunk_id}")
+
+            text_content = embed_input  # kept for downstream call signature
 
             # ------------------------------------------------------------------
             # Generate embedding
             # ------------------------------------------------------------------
             logger.info("%s chunk=%s generating embedding", log_prefix, chunk_id)
-            embedding = await container.embedding_service.get_embedding(text_content)
+            embedding = await container.embedding_service.get_embedding(embed_input)
 
             # ------------------------------------------------------------------
             # Upsert into pgvector

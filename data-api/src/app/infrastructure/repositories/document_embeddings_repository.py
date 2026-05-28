@@ -67,6 +67,9 @@ class DocumentEmbeddingsRepository:
                 parent_id,
                 content AS text,
                 parent_text,
+                chunk_type,
+                table_id,
+                table_dataframe,
                 metadata,
                 1 - (embedding <=> CAST(:query_embedding AS vector)) AS similarity
             FROM "chunk"
@@ -102,6 +105,9 @@ class DocumentEmbeddingsRepository:
                     'parent_id': row.parent_id,
                     'text': row.text,
                     'parent_text': row.parent_text,
+                    'chunk_type': row.chunk_type,
+                    'table_id': row.table_id,
+                    'table_dataframe': row.table_dataframe,
                     'metadata': row.metadata,
                     'similarity': float(row.similarity)
                 }

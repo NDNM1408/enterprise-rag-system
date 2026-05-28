@@ -72,6 +72,22 @@ class Settings(BaseSettings):
         description="Cheap/fast model for per-parent fact extraction (no thinking)",
     )
 
+    # hier_v2 retrieval — final LLM selector picks the top_n most relevant
+    # chunks (across mixed text_child / table_summary / table_segment) after
+    # parent/table dedup. The /query endpoint returns the selector output.
+    SELECTOR_MODEL: str = Field(
+        default="gemini-2.5-flash",
+        description="LLM that picks the final top_n chunks for the search response",
+    )
+    SELECTOR_TOP_N: int = Field(
+        default=10, ge=1, le=50,
+        description="How many chunks the /query endpoint returns after selector",
+    )
+    SELECTOR_OVERFETCH_MULT: int = Field(
+        default=3, ge=1, le=10,
+        description="Over-fetch multiplier before dedup (raw fetch = top_k * this)",
+    )
+
     # Data API self-reference (used by chatbot RAG to query its own KB endpoints)
     DATA_API_URL: str = Field(
         default="http://localhost:8000",
