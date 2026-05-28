@@ -10,6 +10,7 @@ export const createKbSchema = z.object({
   parser_config: z
     .object({
       rag_mode: z.enum(["classic", "llm-wiki"]).optional(),
+      agentic_search: z.boolean().optional(),
     })
     .optional(),
 });
