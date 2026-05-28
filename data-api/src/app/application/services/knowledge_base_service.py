@@ -110,6 +110,21 @@ class KnowledgeBaseService:
         """
         return await self.knowledge_base_repository.get(id=kb_id)
 
+    async def update(self, kb_id: str, patch: dict) -> KnowledgeBase:
+        """Partial update — writes only the keys present in ``patch``.
+
+        ``parser_config`` is replaced wholesale (not merged) so callers must
+        send the complete config they want stored. The DTO already serialises
+        ``ParserConfig`` to dict for us; ``rag_mode`` and ``agentic_search``
+        both round-trip naturally."""
+        if not patch:
+            # No-op update — just return current state.
+            return await self.knowledge_base_repository.get(id=kb_id)
+        await self.knowledge_base_repository.update(
+            data=patch, where={"id": kb_id},
+        )
+        return await self.knowledge_base_repository.get(id=kb_id)
+
     async def delete(self, kb_id: str) -> None:
         """
         Delete a knowledge base by ID, including all related chunks, documents,

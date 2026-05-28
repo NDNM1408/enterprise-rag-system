@@ -217,6 +217,29 @@ export function useQueryKnowledgeBase() {
   });
 }
 
+export interface UpdateKbRequest {
+  name?: string;
+  description?: string;
+  parser_config?: {
+    rag_mode?: "classic" | "llm-wiki";
+    agentic_search?: boolean;
+  };
+}
+
+export function useUpdateKnowledgeBase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ kbId, patch }: { kbId: string; patch: UpdateKbRequest }) => {
+      const { data } = await api.patch(`/api/v1/knowledge_base/${kbId}`, patch);
+      return data;
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["knowledge-base", vars.kbId] });
+      qc.invalidateQueries({ queryKey: ["knowledge-bases"] });
+    },
+  });
+}
+
 export function useDeleteKnowledgeBase() {
   const qc = useQueryClient();
   return useMutation({

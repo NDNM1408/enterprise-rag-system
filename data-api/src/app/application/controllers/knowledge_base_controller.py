@@ -6,7 +6,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Path, Query, Request as FastAPIRequest
 
-from app.application.dtos.requests.knowledge_base_request import CreateKnowledgeBaseRequest
+from app.application.dtos.requests.knowledge_base_request import (
+    CreateKnowledgeBaseRequest,
+    UpdateKnowledgeBaseRequest,
+)
 from app.application.services.knowledge_base_service import KnowledgeBaseService
 from app.configurations.dependencies import get_knowledge_base_service
 from app.application.dtos.responses.success_response import create_success_response
@@ -150,6 +153,35 @@ async def get_knowledge_base(
     return create_success_response(
         data=kb.to_dict() if hasattr(kb, 'to_dict') else kb,
         request_id=request_id
+    )
+
+
+@router.patch(
+    "/{kb_id}",
+    summary="Update knowledge base",
+    description=(
+        "Partial update — send only the fields to change. "
+        "``parser_config`` is replaced wholesale (incl. agentic_search)."
+    ),
+)
+async def update_knowledge_base(
+    request: FastAPIRequest,
+    kb_id: str = Path(..., description="Knowledge Base ID"),
+    kb_request: UpdateKnowledgeBaseRequest = ...,
+    knowledge_base_service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+):
+    """PATCH a KB. Only keys actually present in the body are written."""
+    patch = kb_request.model_dump(exclude_unset=True, exclude_none=False)
+    # Convert nested Pydantic ParserConfig to dict so the repo can write it
+    # straight into the jsonb column.
+    if isinstance(patch.get("parser_config"), dict) is False and patch.get("parser_config") is not None:
+        patch["parser_config"] = patch["parser_config"].model_dump()
+    kb = await knowledge_base_service.update(kb_id, patch)
+
+    request_id = getattr(request.state, "request_id", "unknown")
+    return create_success_response(
+        data=kb.to_dict() if hasattr(kb, "to_dict") else kb,
+        request_id=request_id,
     )
 
 

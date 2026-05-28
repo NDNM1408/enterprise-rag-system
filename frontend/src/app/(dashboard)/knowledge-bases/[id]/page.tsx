@@ -2,7 +2,11 @@
 
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { useKnowledgeBase, useDeleteKnowledgeBase } from "@/lib/hooks";
+import {
+  useKnowledgeBase,
+  useDeleteKnowledgeBase,
+  useUpdateKnowledgeBase,
+} from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,7 +14,7 @@ import { DocumentUpload } from "@/components/knowledge-base/document-upload";
 import { DocumentList } from "@/components/knowledge-base/document-list";
 import { KbQuery } from "@/components/knowledge-base/kb-query";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ArrowLeft, Loader2, Trash2, Database, FileText, Search } from "lucide-react";
+import { ArrowLeft, Loader2, Trash2, Database, FileText, Search, Sparkles } from "lucide-react";
 
 export default function KnowledgeBaseDetailPage() {
   const params = useParams();
@@ -19,6 +23,20 @@ export default function KnowledgeBaseDetailPage() {
 
   const { data: kb, isLoading } = useKnowledgeBase(kbId);
   const deleteKb = useDeleteKnowledgeBase();
+  const updateKb = useUpdateKnowledgeBase();
+
+  const handleToggleAgentic = (next: boolean) => {
+    if (!kb) return;
+    updateKb.mutate({
+      kbId,
+      patch: {
+        parser_config: {
+          rag_mode: kb.parser_config?.rag_mode || "classic",
+          agentic_search: next,
+        },
+      },
+    });
+  };
 
   const handleDelete = () => {
     if (confirm("Are you sure you want to delete this knowledge base?")) {
@@ -79,13 +97,43 @@ export default function KnowledgeBaseDetailPage() {
           <CardTitle className="text-lg">Configuration</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex gap-6">
+          <div className="flex flex-wrap items-start gap-6">
             <div>
               <span className="text-sm text-muted-foreground">RAG Mode</span>
               <p>
                 <Badge variant="secondary">
                   {kb.parser_config?.rag_mode || "classic"}
                 </Badge>
+              </p>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-sm text-muted-foreground mb-1">
+                Agentic search
+              </span>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-input"
+                  checked={!!kb.parser_config?.agentic_search}
+                  disabled={updateKb.isPending}
+                  onChange={(e) => handleToggleAgentic(e.target.checked)}
+                />
+                <Badge
+                  variant={
+                    kb.parser_config?.agentic_search ? "default" : "secondary"
+                  }
+                  className="gap-1"
+                >
+                  <Sparkles className="h-3 w-3" />
+                  {kb.parser_config?.agentic_search ? "ON" : "OFF"}
+                </Badge>
+                {updateKb.isPending && (
+                  <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                )}
+              </label>
+              <p className="text-xs text-muted-foreground mt-1 max-w-md">
+                Planner LLM fans out across pivot axes per query (up to 5
+                iters). Higher recall on cross-basin queries; slower.
               </p>
             </div>
           </div>
