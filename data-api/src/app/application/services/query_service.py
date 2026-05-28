@@ -189,12 +189,19 @@ class QueryService:
         parser_config = kb.parser_config or {}
         rag_mode = parser_config.get("rag_mode", "classic")
         agentic = bool(parser_config.get("agentic_search", False))
+        # Per-KB knob overrides. None → fall back to global defaults.
+        kb_top_n = parser_config.get("top_n")
+        kb_max_iter = parser_config.get("agentic_max_iter")
+        kb_per_iter_k = parser_config.get("agentic_top_k_per_iter")
 
         if rag_mode == "llm-wiki":
             return await self._query_llm_wiki(kb_id=kb_id, query_text=query_text, top_k=top_k)
         if agentic:
             return await self._query_agentic(
                 kb_id=kb_id, query_text=query_text, top_k=top_k,
+                top_n_override=kb_top_n,
+                max_iter_override=kb_max_iter,
+                per_iter_k_override=kb_per_iter_k,
             )
         return await self._query_classic(
             kb_id=kb_id,
@@ -202,6 +209,7 @@ class QueryService:
             top_k=top_k,
             search_type=search_type,
             alpha=alpha,
+            top_n_override=kb_top_n,
         )
 
     # ------------------------------------------------------------------
@@ -213,8 +221,11 @@ class QueryService:
         kb_id: str,
         query_text: str,
         top_k: int,
+        top_n_override: int | None = None,
+        max_iter_override: int | None = None,
+        per_iter_k_override: int | None = None,
     ) -> Dict[str, Any]:
-        top_n = top_k if top_k > 0 else settings.SELECTOR_TOP_N
+        top_n = top_n_override or (top_k if top_k > 0 else settings.SELECTOR_TOP_N)
 
         svc = AgenticSearchService(
             embedding_client=self._embedding_client,
@@ -222,7 +233,10 @@ class QueryService:
             repository_factory=self._classic_session_factory,
             selector_fn=_llm_select,
         )
-        out = await svc.run(kb_id=kb_id, query_text=query_text, top_n=top_n)
+        out = await svc.run(
+            kb_id=kb_id, query_text=query_text, top_n=top_n,
+            max_iter=max_iter_override, per_iter_k=per_iter_k_override,
+        )
         return {
             "kb_id": kb_id,
             "query_type": "hier_v2_agentic",
@@ -244,6 +258,7 @@ class QueryService:
         top_k: int,
         search_type: str,
         alpha: float,
+        top_n_override: int | None = None,
     ) -> Dict[str, Any]:
         try:
             query_embedding = await self._embedding_client.get_embedding(query_text)
@@ -253,7 +268,7 @@ class QueryService:
 
         # hier_v2: over-fetch so parent/table dedup leaves a useful pool for
         # the LLM selector to pick from.
-        top_n = top_k if top_k > 0 else settings.SELECTOR_TOP_N
+        top_n = top_n_override or (top_k if top_k > 0 else settings.SELECTOR_TOP_N)
         fetch_k = max(top_n * settings.SELECTOR_OVERFETCH_MULT, top_n)
 
         async with self._classic_session_factory() as session:

@@ -150,17 +150,22 @@ class RAGNode:
             yield {"type": "content", "delta": "I didn't receive a question. How can I help you?"}
             return
 
-        agentic_kb_id = await self._resolve_agentic_kb(kb_ids)
+        agentic_kb_id, kb_cfg = await self._resolve_agentic_kb(kb_ids)
 
         parents: List[Dict[str, Any]] = []
         graph_contexts: List[str] = []
 
         if agentic_kb_id:
             # In-process agentic loop — every planner hop streams out to UI.
+            # Honour the KB's tunable knobs; fall back to the node default
+            # ``TOP_K_CHILD`` and to AgenticSearchService's settings defaults.
+            top_n = (kb_cfg or {}).get("top_n") or self.TOP_K_CHILD
             async for ev in self._agentic_service().astream(
                 kb_id=agentic_kb_id,
                 query_text=user_query,
-                top_n=self.TOP_K_CHILD,
+                top_n=top_n,
+                max_iter=(kb_cfg or {}).get("agentic_max_iter"),
+                per_iter_k=(kb_cfg or {}).get("agentic_top_k_per_iter"),
             ):
                 phase = ev.get("phase")
                 if phase == "result":
@@ -205,14 +210,18 @@ class RAGNode:
     # Agentic helpers
     # ------------------------------------------------------------------
 
-    async def _resolve_agentic_kb(self, kb_ids: List[str]) -> Optional[str]:
-        """Return the first kb_id whose parser_config.agentic_search is on.
+    async def _resolve_agentic_kb(
+        self, kb_ids: List[str],
+    ) -> tuple[Optional[str], Optional[dict]]:
+        """Return ``(kb_id, parser_config)`` for the first agentic-enabled KB.
 
         Multi-KB agents fall back to single-shot if no KB is agentic; if
         any IS agentic, only that one runs the loop (cross-KB agentic
-        merge is a future improvement)."""
+        merge is a future improvement). Returns the config alongside the
+        id so the caller can read per-KB tunable knobs (top_n,
+        agentic_max_iter, agentic_top_k_per_iter)."""
         if not kb_ids:
-            return None
+            return None, None
         for kb_id in kb_ids:
             try:
                 kb = await self._kb_repo.get(id=kb_id)
@@ -220,8 +229,8 @@ class RAGNode:
                 continue
             cfg = getattr(kb, "parser_config", None) or {}
             if isinstance(cfg, dict) and cfg.get("agentic_search"):
-                return kb_id
-        return None
+                return kb_id, cfg
+        return None, None
 
     def _agentic_service(self):
         if self._agentic_svc is not None:

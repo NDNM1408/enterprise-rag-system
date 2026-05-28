@@ -7,6 +7,9 @@ export interface KnowledgeBase {
   parser_config?: {
     rag_mode?: "classic" | "llm-wiki";
     agentic_search?: boolean;
+    top_n?: number;
+    agentic_max_iter?: number;
+    agentic_top_k_per_iter?: number;
   };
   create_time: string;
   update_time: string;
@@ -19,6 +22,9 @@ export interface CreateKbRequest {
   parser_config?: {
     rag_mode?: "classic" | "llm-wiki";
     agentic_search?: boolean;
+    top_n?: number;
+    agentic_max_iter?: number;
+    agentic_top_k_per_iter?: number;
   };
 }
 
@@ -28,6 +34,9 @@ export interface UpdateKbRequest {
   parser_config?: {
     rag_mode?: "classic" | "llm-wiki";
     agentic_search?: boolean;
+    top_n?: number;
+    agentic_max_iter?: number;
+    agentic_top_k_per_iter?: number;
   };
 }
 
