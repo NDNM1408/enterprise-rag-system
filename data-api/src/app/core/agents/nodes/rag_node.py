@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Dict, Any, List, AsyncIterator
+from typing import Dict, Any, List, Optional, AsyncIterator
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
@@ -23,6 +23,11 @@ from app.core.agents.state import ChatbotState
 from app.configurations.configurations import settings
 from app.infrastructure.clients.litellm_client import LiteLLMClient
 from app.infrastructure.clients.data_api_client import DataApiClient
+from app.infrastructure.clients.embedding_client import EmbeddingClient
+from app.infrastructure.connectors.postgres.database import db_session
+from app.infrastructure.connectors.postgres.repositories.knowledge_base_repository import (
+    KnowledgeBaseRepository,
+)
 from app.infrastructure.connectors.postgres.repositories.parent_facts_repository import (
     ParentFactsRepository,
 )
@@ -84,6 +89,9 @@ class RAGNode:
         self.temperature = temperature
         self.system_prompt = system_prompt
         self.facts_repo = ParentFactsRepository()
+        self._kb_repo = KnowledgeBaseRepository()
+        # Built lazily on the first chat against an agentic KB.
+        self._agentic_svc = None
 
     async def __call__(self, state: ChatbotState) -> Dict[str, Any]:
         """Retrieve context from knowledge bases and generate response."""
@@ -116,12 +124,19 @@ class RAGNode:
             logger.error(f"LLM error: {e}")
             raise ExternalServiceError("LLM", str(e))
 
-    async def stream(self, state: ChatbotState) -> AsyncIterator[Dict[str, str]]:
+    async def stream(self, state: ChatbotState) -> AsyncIterator[Dict[str, Any]]:
         """Stream response from LLM as tagged events.
 
-        Yields ``{"type": "thinking", "delta": "..."}`` for reasoning tokens
-        and ``{"type": "content", "delta": "..."}`` for answer tokens. The
-        chat service forwards these to the SSE controller verbatim."""
+        Yields:
+          ``{"type": "agentic", "phase": ...}`` for each planner hop and
+                                                  selector phase (only when
+                                                  the KB has agentic_search
+                                                  enabled).
+          ``{"type": "thinking", "delta": ...}`` reasoning tokens.
+          ``{"type": "content",  "delta": ...}`` answer tokens.
+
+        Chat service forwards events to SSE verbatim — frontend renders
+        agentic events as a collapsible per-iter progress block."""
         messages = state.get("messages", [])
         kb_ids = state.get("kb_ids", [])
 
@@ -135,7 +150,44 @@ class RAGNode:
             yield {"type": "content", "delta": "I didn't receive a question. How can I help you?"}
             return
 
-        context = await self._build_context(kb_ids, user_query)
+        agentic_kb_id = await self._resolve_agentic_kb(kb_ids)
+
+        parents: List[Dict[str, Any]] = []
+        graph_contexts: List[str] = []
+
+        if agentic_kb_id:
+            # In-process agentic loop — every planner hop streams out to UI.
+            async for ev in self._agentic_service().astream(
+                kb_id=agentic_kb_id,
+                query_text=user_query,
+                top_n=self.TOP_K_CHILD,
+            ):
+                phase = ev.get("phase")
+                if phase == "result":
+                    parents = ev["payload"].get("results", [])
+                    yield {
+                        "type": "agentic",
+                        "phase": "done",
+                        "stop_reason": ev["payload"].get("agentic", {}).get("stop_reason"),
+                        "raw_accumulated": ev["payload"].get("agentic", {}).get("raw_accumulated"),
+                        "selected": len(parents),
+                    }
+                else:
+                    # Forward iter_start / iter_done / stop / selecting as-is.
+                    yield {"type": "agentic", **ev}
+        else:
+            parents, graph_contexts = await self._retrieve_parents(kb_ids, user_query)
+
+        # ── Build LLM context (fact-extract cache reused across paths) ────
+        if not parents and not graph_contexts:
+            context = ""
+        elif not settings.ENABLE_FACT_EXTRACTION:
+            blocks = [p.get("parent_text") or p.get("content") or p.get("text", "") for p in parents]
+            context = "\n\n---\n\n".join([b for b in blocks if b] + graph_contexts)
+        else:
+            facts = await self._get_or_extract_facts(parents)
+            context = self._render_facts_context(parents, facts, graph_contexts)
+
         llm_messages = self._build_llm_messages(messages, context)
 
         try:
@@ -148,6 +200,43 @@ class RAGNode:
         except Exception as e:
             logger.error(f"LLM streaming error: {e}")
             raise ExternalServiceError("LLM", str(e))
+
+    # ------------------------------------------------------------------
+    # Agentic helpers
+    # ------------------------------------------------------------------
+
+    async def _resolve_agentic_kb(self, kb_ids: List[str]) -> Optional[str]:
+        """Return the first kb_id whose parser_config.agentic_search is on.
+
+        Multi-KB agents fall back to single-shot if no KB is agentic; if
+        any IS agentic, only that one runs the loop (cross-KB agentic
+        merge is a future improvement)."""
+        if not kb_ids:
+            return None
+        for kb_id in kb_ids:
+            try:
+                kb = await self._kb_repo.get(id=kb_id)
+            except Exception:
+                continue
+            cfg = getattr(kb, "parser_config", None) or {}
+            if isinstance(cfg, dict) and cfg.get("agentic_search"):
+                return kb_id
+        return None
+
+    def _agentic_service(self):
+        if self._agentic_svc is not None:
+            return self._agentic_svc
+        # Lazy import to avoid an import cycle (query_service imports
+        # AgenticSearchService too).
+        from app.application.services.agentic_search_service import AgenticSearchService
+        from app.application.services.query_service import _llm_select
+        self._agentic_svc = AgenticSearchService(
+            embedding_client=EmbeddingClient(),
+            llm_client=self.llm_client,
+            repository_factory=db_session.get_session(),
+            selector_fn=_llm_select,
+        )
+        return self._agentic_svc
 
     # Number of child chunks to retrieve per knowledge base. The query
     # endpoint already over-fetches and dedupes by parent_id, so this is

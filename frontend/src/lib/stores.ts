@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Message } from "@/types";
+import type { Message, AgenticIter } from "@/types";
 
 // ---------------------------------------------------------------------------
 //  Sidebar collapse state — persists across navigation.
@@ -34,6 +34,7 @@ interface ChatStore {
   messages: Message[];
   currentStreamingContent: string;
   currentStreamingThinking: string;
+  currentStreamingAgentic: AgenticIter[];
   setConversationId: (id: string | null) => void;
   setDraft: (text: string) => void;
   setStreaming: (streaming: boolean) => void;
@@ -41,6 +42,8 @@ interface ChatStore {
   setMessages: (msgs: Message[]) => void;
   setStreamingContent: (content: string) => void;
   setStreamingThinking: (thinking: string) => void;
+  appendAgenticIter: (iter: AgenticIter) => void;
+  setStreamingAgentic: (iters: AgenticIter[]) => void;
   reset: () => void;
 }
 
@@ -51,6 +54,7 @@ export const useChatStore = create<ChatStore>()((set) => ({
   messages: [],
   currentStreamingContent: "",
   currentStreamingThinking: "",
+  currentStreamingAgentic: [],
   setConversationId: (conversationId) => set({ conversationId }),
   setDraft: (draft) => set({ draft }),
   setStreaming: (isStreaming) => set({ isStreaming }),
@@ -58,6 +62,9 @@ export const useChatStore = create<ChatStore>()((set) => ({
   setMessages: (messages) => set({ messages }),
   setStreamingContent: (currentStreamingContent) => set({ currentStreamingContent }),
   setStreamingThinking: (currentStreamingThinking) => set({ currentStreamingThinking }),
+  appendAgenticIter: (iter) =>
+    set((s) => ({ currentStreamingAgentic: [...s.currentStreamingAgentic, iter] })),
+  setStreamingAgentic: (currentStreamingAgentic) => set({ currentStreamingAgentic }),
   reset: () =>
     set({
       conversationId: null,
@@ -66,5 +73,6 @@ export const useChatStore = create<ChatStore>()((set) => ({
       messages: [],
       currentStreamingContent: "",
       currentStreamingThinking: "",
+      currentStreamingAgentic: [],
     }),
 }));

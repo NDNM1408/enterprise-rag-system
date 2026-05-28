@@ -141,14 +141,21 @@ class ChatbotService:
             # Agent emits tagged dicts:
             #   {"type": "content",  "delta": "..."}  → answer tokens
             #   {"type": "thinking", "delta": "..."}  → reasoning tokens
+            #   {"type": "agentic", "phase": "...", ...}  → planner-hop progress
             # Plain strings are tolerated as legacy "content" fallback.
             if isinstance(event, dict):
                 ev_type = event.get("type", "content")
-                delta = event.get("delta") or event.get("content") or ""
             else:
                 ev_type = "content"
-                delta = str(event)
+                event = {"type": "content", "delta": str(event)}
 
+            # Agentic progress: forward the whole payload to the client. No
+            # text accumulation — these are UI-only progress signals.
+            if ev_type == "agentic":
+                yield event
+                continue
+
+            delta = event.get("delta") or event.get("content") or ""
             if not delta:
                 continue
 

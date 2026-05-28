@@ -111,12 +111,39 @@ export interface Source {
   metadata?: Record<string, unknown>;
 }
 
+export interface AgenticIter {
+  iter: number;
+  phase:
+    | "iter_start"
+    | "iter_done"
+    | "stop"
+    | "selecting"
+    | "done";
+  sub_queries?: string[];
+  axes?: string[];
+  thought?: string;
+  new_count?: number;
+  total_accumulated?: number;
+  top_preview?: Array<{
+    doc_name?: string;
+    heading_path?: string;
+    chunk_type?: string;
+    similarity?: number;
+  }>;
+  reason?: string;
+  candidates?: number;
+  stop_reason?: string;
+  selected?: number;
+  raw_accumulated?: number;
+}
+
 export interface Message {
   id: string;
   conversation_id: string;
   role: "human" | "ai" | "system";
   content: string;
   thinking?: string;
+  agentic?: AgenticIter[];
   create_time: string;
 }
 

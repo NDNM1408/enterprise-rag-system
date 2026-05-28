@@ -404,6 +404,8 @@ export function useChat(agentId: string) {
     setStreaming,
     setStreamingContent,
     setStreamingThinking,
+    appendAgenticIter,
+    setStreamingAgentic,
   } = useChatStore();
 
   return useMutation<void, Error, string>({
@@ -421,6 +423,7 @@ export function useChat(agentId: string) {
       //    will render a typing indicator until the first token arrives.
       setStreamingContent("");
       setStreamingThinking("");
+      setStreamingAgentic([]);
       setStreaming(true);
 
       const url = `${api.defaults.baseURL ?? ""}/api/v1/agents/${agentId}/chat/stream`;
@@ -444,6 +447,7 @@ export function useChat(agentId: string) {
       let buffer = "";
       let assembled = "";
       let assembledThinking = "";
+      const assembledAgentic: import("@/types").AgenticIter[] = [];
 
       try {
         while (true) {
@@ -468,12 +472,26 @@ export function useChat(agentId: string) {
               //   {type: "meta",     conversation_id}
               //   {type: "delta",    content}    ← answer tokens
               //   {type: "thinking", delta}      ← reasoning tokens
+              //   {type: "agentic",  phase, iter, sub_queries, axes, top_preview, ...}
               try {
                 const event = JSON.parse(payload) as {
                   type: string;
                   content?: string;
                   delta?: string;
                   conversation_id?: string;
+                  phase?: string;
+                  iter?: number;
+                  sub_queries?: string[];
+                  axes?: string[];
+                  thought?: string;
+                  new_count?: number;
+                  total_accumulated?: number;
+                  top_preview?: import("@/types").AgenticIter["top_preview"];
+                  reason?: string;
+                  candidates?: number;
+                  stop_reason?: string;
+                  selected?: number;
+                  raw_accumulated?: number;
                 };
                 if (event.type === "meta" && event.conversation_id) {
                   setConversationId(event.conversation_id);
@@ -483,6 +501,24 @@ export function useChat(agentId: string) {
                 } else if (event.type === "thinking" && event.delta) {
                   assembledThinking += event.delta;
                   setStreamingThinking(assembledThinking);
+                } else if (event.type === "agentic") {
+                  const iter: import("@/types").AgenticIter = {
+                    iter: event.iter ?? 0,
+                    phase: (event.phase ?? "iter_start") as import("@/types").AgenticIter["phase"],
+                    sub_queries: event.sub_queries,
+                    axes: event.axes,
+                    thought: event.thought,
+                    new_count: event.new_count,
+                    total_accumulated: event.total_accumulated,
+                    top_preview: event.top_preview,
+                    reason: event.reason,
+                    candidates: event.candidates,
+                    stop_reason: event.stop_reason,
+                    selected: event.selected,
+                    raw_accumulated: event.raw_accumulated,
+                  };
+                  assembledAgentic.push(iter);
+                  appendAgenticIter(iter);
                 }
               } catch {
                 // Tolerate any non-JSON frame by appending it raw — keeps
@@ -504,10 +540,12 @@ export function useChat(agentId: string) {
         role: "ai",
         content: assembled,
         thinking: assembledThinking || undefined,
+        agentic: assembledAgentic.length ? assembledAgentic : undefined,
         create_time: new Date().toISOString(),
       });
       setStreamingContent("");
       setStreamingThinking("");
+      setStreamingAgentic([]);
       setStreaming(false);
 
       // The backend assigns / reuses a conversation id; refetch the history
