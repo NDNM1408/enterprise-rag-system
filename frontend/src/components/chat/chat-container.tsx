@@ -16,6 +16,7 @@ export function ChatContainer({ onSendMessage, isLoading }: ChatContainerProps) 
     isStreaming,
     currentStreamingContent,
     currentStreamingThinking,
+    currentStreamingAgentic,
   } = useChatStore();
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -24,7 +25,13 @@ export function ChatContainer({ onSendMessage, isLoading }: ChatContainerProps) 
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, currentStreamingContent, currentStreamingThinking, isStreaming]);
+  }, [
+    messages,
+    currentStreamingContent,
+    currentStreamingThinking,
+    currentStreamingAgentic.length,
+    isStreaming,
+  ]);
 
   // Synthetic placeholder for the in-flight AI reply. Until the stream
   // finishes, the real AI message isn't in `messages` yet — this row carries
@@ -69,6 +76,7 @@ export function ChatContainer({ onSendMessage, isLoading }: ChatContainerProps) 
                 isStreaming
                 streamingContent={currentStreamingContent}
                 streamingThinking={currentStreamingThinking}
+                streamingAgentic={currentStreamingAgentic}
               />
             )}
           </div>

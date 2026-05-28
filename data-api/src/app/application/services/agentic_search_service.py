@@ -1,4 +1,4 @@
-"""Agentic basin-pivot search (hier_v2 Phase 2).
+"""Agentic basin-pivot search (hier_v2 Phase 2) — sync + streaming variants.
 
 Each iteration the planner LLM fans out 1-3 sub-queries on DIFFERENT pivot
 axes (KIND of fact / target section-type / current basin / uncovered axes
@@ -178,19 +178,45 @@ class AgenticSearchService:
         query_text: str,
         top_n: int,
     ) -> Dict[str, Any]:
+        """Non-streaming run — drain ``astream`` and return the final result."""
+        final: Dict[str, Any] = {}
+        async for ev in self.astream(kb_id=kb_id, query_text=query_text, top_n=top_n):
+            if ev.get("phase") == "result":
+                final = ev["payload"]
+        return final
+
+    async def astream(
+        self,
+        *,
+        kb_id: str,
+        query_text: str,
+        top_n: int,
+    ):
+        """Yield per-iter events so the chat SSE can show progress live.
+
+        Event shape (all keyed on ``phase``):
+
+          {phase: "iter_start", iter, sub_queries, axes, thought}
+          {phase: "iter_done",  iter, new_count, total_accumulated, top_preview}
+          {phase: "stop",       iter, reason}
+          {phase: "selecting",  candidates}
+          {phase: "result",     payload: {results, agentic: {...}}}
+
+        ``top_preview`` is a tiny [{doc_name, heading_path, chunk_type, similarity}]
+        slice (≤3) the UI uses to show what surfaced this iter without dumping
+        whole chunks.
+        """
         max_iter = settings.AGENTIC_MAX_ITER
         per_iter_k = settings.AGENTIC_TOP_K_PER_ITER
 
-        history: List[Dict[str, Any]] = []        # per-iter planner output
-        accumulated: Dict[str, Dict[str, Any]] = {}  # chunk_id → chunk (first-seen)
-        prev_iter_count = 0
+        history: List[Dict[str, Any]] = []
+        accumulated: Dict[str, Dict[str, Any]] = {}
         zero_new_streak = 0
         stop_reason: str | None = None
 
         for it in range(1, max_iter + 1):
             decision = await self._plan(query_text, history, accumulated, it, max_iter)
 
-            # Planner can stop only at iter 2+ (iter 1 we always search).
             if it >= 2 and decision.get("action") == "stop":
                 stop_reason = decision.get("reason") or "planner_stop"
                 history.append({
@@ -198,28 +224,45 @@ class AgenticSearchService:
                     "action": "stop", "sub_queries": [], "axes": [],
                     "reason": stop_reason,
                 })
+                yield {"phase": "stop", "iter": it, "reason": stop_reason,
+                       "thought": decision.get("thought", "")}
                 break
 
             sub_queries = self._normalize_sub_queries(decision, query_text, it)
             axes = decision.get("axes") or []
             if not sub_queries:
-                # Defensive — planner returned nothing usable; fall back to original.
                 sub_queries = [query_text]
 
-            # Embed + search every sub-query in parallel.
+            yield {
+                "phase": "iter_start",
+                "iter": it,
+                "sub_queries": sub_queries,
+                "axes": axes,
+                "thought": decision.get("thought", ""),
+            }
+
             per_sq = await asyncio.gather(
                 *(self._search_one(kb_id, sq, per_iter_k) for sq in sub_queries),
                 return_exceptions=True,
             )
             merged = self._merge_iter([r for r in per_sq if not isinstance(r, Exception)])
 
-            # Accumulate first-seen in score order.
             new_count = 0
             for h in merged:
                 cid = h.get("chunk_id")
                 if cid and cid not in accumulated:
                     accumulated[cid] = h
                     new_count += 1
+
+            top_preview = [
+                {
+                    "doc_name": h.get("doc_name"),
+                    "heading_path": h.get("heading_path"),
+                    "chunk_type": h.get("chunk_type"),
+                    "similarity": round(float(h.get("similarity") or 0), 3),
+                }
+                for h in merged[:3]
+            ]
 
             history.append({
                 "iter": it,
@@ -231,8 +274,14 @@ class AgenticSearchService:
                 "new_count": new_count,
             })
 
-            # Code-level exhaustion guard (planner is supposed to call this
-            # via condition (b), but enforce it defensively).
+            yield {
+                "phase": "iter_done",
+                "iter": it,
+                "new_count": new_count,
+                "total_accumulated": len(accumulated),
+                "top_preview": top_preview,
+            }
+
             if new_count == 0:
                 zero_new_streak += 1
             else:
@@ -240,9 +289,9 @@ class AgenticSearchService:
             distinct_surfaces = sum(len(h.get("sub_queries", [])) for h in history)
             if zero_new_streak >= 2 and distinct_surfaces >= 3:
                 stop_reason = "exhaustion_no_new"
+                yield {"phase": "stop", "iter": it, "reason": stop_reason,
+                       "thought": "code-level exhaustion guard"}
                 break
-
-            prev_iter_count = len(accumulated)
 
         if not stop_reason:
             stop_reason = "max_iters" if len(history) >= max_iter else "complete"
@@ -250,18 +299,23 @@ class AgenticSearchService:
         candidates = list(accumulated.values())
         candidates.sort(key=lambda r: -float(r.get("similarity") or 0))
 
+        yield {"phase": "selecting", "candidates": len(candidates)}
+
         selected, fallback = await self.selector_fn(
             self.llm_client, query_text, candidates, top_n,
         )
 
-        return {
-            "results": selected,
-            "agentic": {
-                "iterations": history,
-                "stop_reason": stop_reason,
-                "raw_accumulated": len(accumulated),
-                "selector_fallback": fallback,
-                "selector_model": settings.SELECTOR_MODEL,
+        yield {
+            "phase": "result",
+            "payload": {
+                "results": selected,
+                "agentic": {
+                    "iterations": history,
+                    "stop_reason": stop_reason,
+                    "raw_accumulated": len(accumulated),
+                    "selector_fallback": fallback,
+                    "selector_model": settings.SELECTOR_MODEL,
+                },
             },
         }
 
