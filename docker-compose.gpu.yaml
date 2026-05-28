@@ -42,7 +42,7 @@ services:
     volumes:
       - pgvector-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres"]
+      test: ["CMD", "pg_isready", "-U", "datahub", "-d", "datahub"]
       interval: 30s
       timeout: 10s
       retries: 5

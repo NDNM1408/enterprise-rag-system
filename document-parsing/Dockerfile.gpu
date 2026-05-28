@@ -1,19 +1,24 @@
 # syntax=docker/dockerfile:1.6
 # GPU worker/API container: same ONNX-only vn_parser stack as the CPU
-# Dockerfile, but on a CUDA + cuDNN base so onnxruntime-gpu's
-# CUDAExecutionProvider can load. No torch / vietocr / transformers.
+# Dockerfile, but on a CUDA + cuDNN devel base so onnxruntime-gpu's
+# CUDAExecutionProvider has every runtime lib it dlopens (cuBLAS, cuFFT,
+# cuRAND, cuSPARSE, cuSOLVER, NVRTC, cuDNN). The `runtime` variant ships
+# only a subset and ORT 1.19+ fails with `libcublasLt.so.12: cannot open
+# shared object file`. No torch / vietocr / transformers.
 #
-# Build via the compose GPU overlay:
-#   docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml build
-#   docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d
+# Build:
+#   docker compose -f docker-compose.gpu.yaml build
+#   docker compose -f docker-compose.gpu.yaml up -d
 #
-# Requires NVIDIA driver + nvidia-container-toolkit on the host. CUDA 12.4 +
-# cuDNN 9 matches onnxruntime-gpu >= 1.19.
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# Requires NVIDIA driver + nvidia-container-toolkit on the host.
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Ensure the dynamic linker finds the CUDA libs the devel image installs
+# (NVIDIA images already export this, but make it explicit).
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:${LD_LIBRARY_PATH}
 
 # Python 3.12 (deadsnakes) + the same native libs the CPU image installs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
