@@ -223,6 +223,9 @@ export interface UpdateKbRequest {
   parser_config?: {
     rag_mode?: "classic" | "llm-wiki";
     agentic_search?: boolean;
+    top_n?: number | null;
+    agentic_max_iter?: number | null;
+    agentic_top_k_per_iter?: number | null;
   };
 }
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -16,6 +17,64 @@ import { KbQuery } from "@/components/knowledge-base/kb-query";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowLeft, Loader2, Trash2, Database, FileText, Search, Sparkles } from "lucide-react";
 
+/** Numeric input that PATCHes on blur. Empty value clears the override
+ *  (server then falls back to the global default placeholder). */
+function KbNumberKnob({
+  label,
+  hint,
+  value,
+  placeholder,
+  disabled,
+  onCommit,
+}: {
+  label: string;
+  hint: string;
+  value: number | null | undefined;
+  placeholder: number;
+  disabled?: boolean;
+  onCommit: (v: number | null) => void;
+}) {
+  const [local, setLocal] = useState<string>(value != null ? String(value) : "");
+  useEffect(() => {
+    setLocal(value != null ? String(value) : "");
+  }, [value]);
+  const commit = () => {
+    const trimmed = local.trim();
+    if (trimmed === "") {
+      onCommit(null);
+      return;
+    }
+    const n = Number(trimmed);
+    if (Number.isFinite(n) && n > 0) {
+      onCommit(Math.floor(n));
+    } else {
+      setLocal(value != null ? String(value) : "");
+    }
+  };
+  return (
+    <div className="flex flex-col">
+      <label className="text-xs text-muted-foreground mb-1">{label}</label>
+      <input
+        type="number"
+        min={1}
+        max={50}
+        disabled={disabled}
+        value={local}
+        placeholder={`default ${placeholder}`}
+        onChange={(e) => setLocal(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        className="w-32 rounded-md border border-input bg-background px-2 py-1 text-sm shadow-xs disabled:opacity-50"
+      />
+      <span className="text-[10px] text-muted-foreground mt-0.5 max-w-[10rem]">
+        {hint}
+      </span>
+    </div>
+  );
+}
+
 export default function KnowledgeBaseDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -25,18 +84,27 @@ export default function KnowledgeBaseDetailPage() {
   const deleteKb = useDeleteKnowledgeBase();
   const updateKb = useUpdateKnowledgeBase();
 
-  const handleToggleAgentic = (next: boolean) => {
+  // Build a parser_config patch that preserves the current state and
+  // overrides only the fields we're changing — server replaces the whole
+  // jsonb wholesale, so we must always send the complete config.
+  const patchConfig = (overrides: Partial<NonNullable<typeof kb>["parser_config"]>) => {
     if (!kb) return;
     updateKb.mutate({
       kbId,
       patch: {
         parser_config: {
           rag_mode: kb.parser_config?.rag_mode || "classic",
-          agentic_search: next,
+          agentic_search: kb.parser_config?.agentic_search || false,
+          top_n: kb.parser_config?.top_n,
+          agentic_max_iter: kb.parser_config?.agentic_max_iter,
+          agentic_top_k_per_iter: kb.parser_config?.agentic_top_k_per_iter,
+          ...overrides,
         },
       },
     });
   };
+
+  const handleToggleAgentic = (next: boolean) => patchConfig({ agentic_search: next });
 
   const handleDelete = () => {
     if (confirm("Are you sure you want to delete this knowledge base?")) {
@@ -132,10 +200,40 @@ export default function KnowledgeBaseDetailPage() {
                 )}
               </label>
               <p className="text-xs text-muted-foreground mt-1 max-w-md">
-                Planner LLM fans out across pivot axes per query (up to 5
-                iters). Higher recall on cross-basin queries; slower.
+                Planner LLM fans out across pivot axes per query. Higher
+                recall on cross-basin queries; slower.
               </p>
             </div>
+            <div className="basis-full" />
+            <KbNumberKnob
+              label="Top N (returned chunks)"
+              hint="Final chunks fed to the answer LLM."
+              value={kb.parser_config?.top_n}
+              placeholder={10}
+              onCommit={(v) => patchConfig({ top_n: v as number | undefined })}
+            />
+            <KbNumberKnob
+              label="Max iterations"
+              hint="Hard cap on planner hops (agentic only)."
+              value={kb.parser_config?.agentic_max_iter}
+              placeholder={5}
+              disabled={!kb.parser_config?.agentic_search}
+              onCommit={(v) =>
+                patchConfig({ agentic_max_iter: v as number | undefined })
+              }
+            />
+            <KbNumberKnob
+              label="Top K per iter"
+              hint="Vector top_k per sub-query per hop."
+              value={kb.parser_config?.agentic_top_k_per_iter}
+              placeholder={5}
+              disabled={!kb.parser_config?.agentic_search}
+              onCommit={(v) =>
+                patchConfig({
+                  agentic_top_k_per_iter: v as number | undefined,
+                })
+              }
+            />
           </div>
         </CardContent>
       </Card>

@@ -177,10 +177,15 @@ class AgenticSearchService:
         kb_id: str,
         query_text: str,
         top_n: int,
+        max_iter: int | None = None,
+        per_iter_k: int | None = None,
     ) -> Dict[str, Any]:
         """Non-streaming run — drain ``astream`` and return the final result."""
         final: Dict[str, Any] = {}
-        async for ev in self.astream(kb_id=kb_id, query_text=query_text, top_n=top_n):
+        async for ev in self.astream(
+            kb_id=kb_id, query_text=query_text, top_n=top_n,
+            max_iter=max_iter, per_iter_k=per_iter_k,
+        ):
             if ev.get("phase") == "result":
                 final = ev["payload"]
         return final
@@ -191,6 +196,8 @@ class AgenticSearchService:
         kb_id: str,
         query_text: str,
         top_n: int,
+        max_iter: int | None = None,
+        per_iter_k: int | None = None,
     ):
         """Yield per-iter events so the chat SSE can show progress live.
 
@@ -205,9 +212,12 @@ class AgenticSearchService:
         ``top_preview`` is a tiny [{doc_name, heading_path, chunk_type, similarity}]
         slice (≤3) the UI uses to show what surfaced this iter without dumping
         whole chunks.
+
+        ``max_iter`` / ``per_iter_k`` are per-call overrides — used to honour
+        the KB's parser_config knobs. ``None`` keeps the global defaults.
         """
-        max_iter = settings.AGENTIC_MAX_ITER
-        per_iter_k = settings.AGENTIC_TOP_K_PER_ITER
+        max_iter = max_iter if max_iter is not None else settings.AGENTIC_MAX_ITER
+        per_iter_k = per_iter_k if per_iter_k is not None else settings.AGENTIC_TOP_K_PER_ITER
 
         history: List[Dict[str, Any]] = []
         accumulated: Dict[str, Dict[str, Any]] = {}
