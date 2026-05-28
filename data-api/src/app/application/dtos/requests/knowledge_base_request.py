@@ -42,5 +42,16 @@ class CreateKnowledgeBaseRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class UpdateKnowledgeBaseRequest(BaseModel):
+    """Partial update — only the fields actually sent are written."""
+    name: Optional[str] = Field(None, description="Rename the KB")
+    description: Optional[str] = Field(None, description="Update description")
+    parser_config: Optional[ParserConfig] = Field(
+        None, description="Replace parser/RAG-mode configuration (incl. agentic_search)",
+    )
+
+    model_config = {"extra": "ignore"}
+
+
 class QueryDataKnowledgeBaseRequest(BaseQueryRequest):
     pass

@@ -6,6 +6,7 @@ export interface KnowledgeBase {
   embed_id?: string;
   parser_config?: {
     rag_mode?: "classic" | "llm-wiki";
+    agentic_search?: boolean;
   };
   create_time: string;
   update_time: string;
@@ -17,6 +18,7 @@ export interface CreateKbRequest {
   description?: string;
   parser_config?: {
     rag_mode?: "classic" | "llm-wiki";
+    agentic_search?: boolean;
   };
 }
 
@@ -25,6 +27,7 @@ export interface UpdateKbRequest {
   description?: string;
   parser_config?: {
     rag_mode?: "classic" | "llm-wiki";
+    agentic_search?: boolean;
   };
 }
 
